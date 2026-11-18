@@ -29,6 +29,7 @@
 
 #include "recomp_ui.h"
 #include "recomp_input.h"
+#include "bm64_debug.h"
 #include "zelda_config.h"
 #include "zelda_sound.h"
 #include "zelda_render.h"
@@ -534,6 +535,12 @@ int main(int argc, char** argv) {
     recomp::Version project_version{};
     if (!recomp::Version::from_string(version_string, project_version)) {
         ultramodern::error_handling::message_box(("Invalid version string: " + version_string).c_str());
+        return EXIT_FAILURE;
+    }
+
+    if (std::string env_error = bm64::debug::environment_error(); !env_error.empty()) {
+        fprintf(stderr, "%s\n", env_error.c_str());
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Bomberman 64: Recompiled", env_error.c_str(), nullptr);
         return EXIT_FAILURE;
     }
 

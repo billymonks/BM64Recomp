@@ -559,7 +559,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
     }
 
     // Return to the launcher if no menu is open and the game isn't started.
-    if (!recompui::is_any_context_shown() && !ultramodern::is_game_started()) {
+    if (!recompui::is_any_context_shown() && !ultramodern::is_game_started() && !recompui::try_autostart_game()) {
         recompui::show_context(recompui::get_launcher_context_id(), "");
     }
 
@@ -776,6 +776,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
         ui_state->context->Update();
         ui_state->context->Render();
         ui_state->render_interface.end(command_list, swap_chain_framebuffer);
+        recompui::note_debug_overlay_drawn(ui_state->context);
     }
 }
 

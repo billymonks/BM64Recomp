@@ -1,6 +1,7 @@
 #include "recomp_ui.h"
 #include "zelda_config.h"
 #include "zelda_support.h"
+#include "bm64_debug.h"
 #include "librecomp/game.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "RmlUi/Core.h"
@@ -52,6 +53,19 @@ recompui::ContextId launcher_context;
 
 recompui::ContextId recompui::get_launcher_context_id() {
 	return launcher_context;
+}
+
+bool recompui::try_autostart_game() {
+    static bool attempted = false;
+    if (attempted || !bm64::debug::autostart_requested()) {
+        return false;
+    }
+    attempted = true;
+    if (!mm_rom_valid) {
+        return false;
+    }
+    recomp::start_game(supported_games[0].game_id);
+    return true;
 }
 
 class LauncherMenu : public recompui::MenuController {

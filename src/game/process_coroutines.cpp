@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdarg>
 #include <array>
+#include <vector>
+#include "bm64_debug.h"
 
 // ============================================================================
 // Configuration
@@ -474,4 +476,13 @@ extern "C" void setjmp_recomp(uint8_t* rdram, recomp_context* ctx) {
     (void)rdram;
     (void)ctx;
     fprintf(stderr, "[Process] ERROR: setjmp_recomp called - this should not happen!\n");
+}
+
+void bm64::debug::get_process_stacks(std::vector<ProcessStack>& out) {
+    out.clear();
+    for (const auto& slot : g_slots) {
+        if (slot.state == ProcessState::Suspended || slot.state == ProcessState::Created) {
+            out.push_back({ slot.process_id, slot.mips_sp, static_cast<uint32_t>(slot.ctx.r29) });
+        }
+    }
 }

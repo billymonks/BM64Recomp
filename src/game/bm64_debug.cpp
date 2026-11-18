@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,21 +31,39 @@ namespace {
     //   then one 24-byte frame per controller read: 4 x { u16 button; s8 stick_x; s8 stick_y; u8 errno; u8 reserved; }
     constexpr std::streamoff seed_offset = 12;
 
-    struct HashRange {
-        std::string name;
+    struct Segment {
         uint32_t start;
         uint32_t end;
     };
 
-    // Ranges that hold game state; see the RDRAM map in docs/game-internals.md.
+    struct HashRange {
+        std::string name;
+        std::vector<Segment> segments;
+    };
+
+    // Ranges that hold game state, minus OS, scheduler, render-thread and audio objects that other threads write.
+    // See "State hash ranges" in docs/game-internals.md for what each gap is.
     std::vector<HashRange> default_ranges() {
         return {
-            { "ovl",  0x80043000, 0x80063000 },
-            { "bss",  0x80063000, 0x800BEA60 },
-            { "main", 0x8029F5E0, 0x802B36D0 },
-            { "heap", 0x802B36D0, 0x80400000 },
+            { "ovl",  { { 0x80043000, 0x80063000 } } },
+            { "bss",  { { 0x80063000, 0x800BD770 }, { 0x800BD818, 0x800BE848 } } },
+            { "data", { { 0x8029F5E4, 0x8029F608 }, { 0x8029F6D8, 0x802A5300 } } },
+            { "gfx",  { { 0x802A5300, 0x802A5330 }, { 0x802A5368, 0x802A5380 }, { 0x802A53BC, 0x802A5550 },
+                        { 0x802A5554, 0x802A5A60 } } },
+            { "prc",  { { 0x802AB200, 0x802AC3E0 } } },
+            { "game", { { 0x802AC400, 0x802AD120 }, { 0x802AFC20, 0x802B36D0 } } },
+            { "heap", { { 0x802B36D0, 0x80400000 } } },
         };
     }
+
+    constexpr uint32_t dump_start = 0x80000000;
+    constexpr uint32_t dump_end = 0x80800000;
+
+    constexpr uint32_t process_pool = 0x80063370;
+    constexpr uint32_t process_size = 0x8A0;
+    constexpr uint32_t process_count = 0x50;
+    constexpr uint32_t process_stack = 0x28;
+    constexpr uint32_t process_stack_size = 0x800;
 
     enum class InputMode { Live, Record, Replay, ReplayEnded };
 
@@ -59,14 +79,29 @@ namespace {
         uint32_t seed = 0;
 
         std::vector<HashRange> ranges = default_ranges();
+        bool hash_dead_stacks = false;
         FILE* hash_log = nullptr;
+
+        std::vector<uint64_t> dump_ticks;
+        std::filesystem::path dump_dir = "dumps";
+
+        bool exit_on_replay_end = false;
+        int64_t exit_tick = -1;
+        bool exiting = false;
 
         uint64_t tick = 0;
         uint64_t input_frame = 0;
-        bool overlay_shown = false;
     } state;
 
-    std::atomic<bool> overlay_toggle_requested = false;
+    // Toggled from the input thread, read by the game thread to decide whether to refresh the overlay text.
+    std::atomic<bool> overlay_shown = false;
+    std::mutex overlay_toggle_mutex;
+
+    void set_overlay_shown(bool shown) {
+        std::lock_guard lock{ overlay_toggle_mutex };
+        overlay_shown = shown;
+        recompui::set_debug_overlay_shown(shown);
+    }
 
     const char* env(const char* name) {
         const char* v = std::getenv(name);
@@ -122,23 +157,42 @@ namespace {
         return true;
     }
 
+    std::vector<std::string> split(const std::string& s, char sep) {
+        std::vector<std::string> out;
+        size_t pos = 0;
+        while (pos <= s.size()) {
+            size_t next = s.find(sep, pos);
+            if (next == std::string::npos) {
+                next = s.size();
+            }
+            if (next > pos) {
+                out.push_back(s.substr(pos, next - pos));
+            }
+            pos = next + 1;
+        }
+        return out;
+    }
+
+    // "[name:]start-end[+start-end...]", comma-separated.
     void parse_hash_ranges(const char* spec) {
         std::vector<HashRange> ranges;
-        std::string s{ spec };
-        size_t pos = 0;
-        while (pos < s.size()) {
-            size_t comma = s.find(',', pos);
-            std::string item = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-            size_t dash = item.find('-');
-            uint32_t start = 0, end = 0;
-            if (dash != std::string::npos && parse_hex(item.substr(0, dash), start) && parse_hex(item.substr(dash + 1), end) &&
-                start >= 0x80000000 && end > start && end <= 0x80800000) {
-                ranges.push_back({ item, start, end });
+        for (const std::string& item : split(spec, ',')) {
+            size_t colon = item.find(':');
+            HashRange range{ colon == std::string::npos ? item : item.substr(0, colon), {} };
+            bool ok = true;
+            for (const std::string& seg : split(colon == std::string::npos ? item : item.substr(colon + 1), '+')) {
+                size_t dash = seg.find('-');
+                uint32_t start = 0, end = 0;
+                ok = ok && dash != std::string::npos && parse_hex(seg.substr(0, dash), start) &&
+                    parse_hex(seg.substr(dash + 1), end) && start >= 0x80000000 && end > start && end <= 0x80800000;
+                range.segments.push_back({ start, end });
             }
-            if (comma == std::string::npos) {
-                break;
+            if (ok && !range.segments.empty()) {
+                ranges.push_back(std::move(range));
             }
-            pos = comma + 1;
+            else {
+                fprintf(stderr, "[bm64 debug] Ignoring hash range %s\n", item.c_str());
+            }
         }
         if (!ranges.empty()) {
             state.ranges = std::move(ranges);
@@ -146,6 +200,120 @@ namespace {
         else {
             fprintf(stderr, "[bm64 debug] BM64_HASH_RANGES had no valid ranges, using defaults\n");
         }
+    }
+
+    void parse_dump_ticks(const char* spec) {
+        for (const std::string& item : split(spec, ',')) {
+            char* end = nullptr;
+            unsigned long long tick = std::strtoull(item.c_str(), &end, 10);
+            if (end != nullptr && *end == '\0') {
+                state.dump_ticks.push_back(tick);
+            }
+            else {
+                fprintf(stderr, "[bm64 debug] Ignoring dump tick %s\n", item.c_str());
+            }
+        }
+    }
+
+    // Process stack memory below a suspended process's sp holds stale values (sometimes audio-heap pointers left by
+    // sound calls) that never affect the game. Unused inline stacks (free pool entries, or processes that were given
+    // their own stack) are dead entirely. Returns sorted, non-overlapping ranges.
+    std::vector<Segment> dead_stacks(uint8_t* rdram) {
+        std::vector<bm64::debug::ProcessStack> live;
+        bm64::debug::get_process_stacks(live);
+        std::vector<Segment> dead;
+        for (uint32_t i = 0; i < process_count; i++) {
+            uint32_t p = process_pool + i * process_size;
+            uint32_t inline_lo = p + process_stack;
+            uint32_t inline_hi = inline_lo + process_stack_size;
+            uint32_t id = static_cast<uint16_t>(MEM_HU(0, addr_reg(p)));
+            uint32_t size = read_u32(rdram, p + 0x20);
+            uint32_t sptop = read_u32(rdram, p + 0x24);
+            const bm64::debug::ProcessStack* s = nullptr;
+            for (const auto& l : live) {
+                if (l.process_id == id && l.top == sptop + size) {
+                    s = &l;
+                }
+            }
+            auto live_sp = [&](uint32_t lo, uint32_t hi) { return (s->sp > lo && s->sp <= hi) ? s->sp : hi; };
+            if (s != nullptr && sptop == inline_lo) {
+                dead.push_back({ inline_lo, live_sp(inline_lo, inline_hi) });
+                continue;
+            }
+            dead.push_back({ inline_lo, inline_hi });
+            if (s != nullptr && is_rdram_ptr(sptop)) {
+                dead.push_back({ sptop, live_sp(sptop, s->top) });
+            }
+        }
+        std::sort(dead.begin(), dead.end(), [](const Segment& a, const Segment& b) { return a.start < b.start; });
+        std::vector<Segment> merged;
+        for (const Segment& d : dead) {
+            if (d.end <= d.start) {
+                continue;
+            }
+            if (!merged.empty() && d.start <= merged.back().end) {
+                merged.back().end = std::max(merged.back().end, d.end);
+            }
+            else {
+                merged.push_back(d);
+            }
+        }
+        return merged;
+    }
+
+    // Feeds [seg.start, seg.end) minus the masked ranges to both hash states.
+    void hash_segment(uint8_t* rdram, const Segment& seg, const std::vector<Segment>& mask,
+                      XXH3_state_t* range, XXH3_state_t* total) {
+        uint32_t pos = seg.start;
+        auto feed = [&](uint32_t from, uint32_t to) {
+            if (to > from) {
+                XXH3_64bits_update(range, rdram + (from - 0x80000000u), to - from);
+                XXH3_64bits_update(total, rdram + (from - 0x80000000u), to - from);
+            }
+        };
+        for (const Segment& m : mask) {
+            if (m.end <= pos || m.start >= seg.end) {
+                continue;
+            }
+            feed(pos, std::min(m.start, seg.end));
+            pos = std::max(pos, m.end);
+        }
+        feed(pos, seg.end);
+    }
+
+    // Writes RDRAM in N64 (big-endian) byte order; rdram holds each 32-bit word in host order.
+    // The dead-stack ranges go to tick_<n>.mask for tools/re/dumpdiff.py.
+    void dump_rdram(uint8_t* rdram, const std::vector<Segment>& mask) {
+        std::filesystem::create_directories(state.dump_dir);
+        std::filesystem::path path = state.dump_dir / ("tick_" + std::to_string(state.tick) + ".bin");
+        std::vector<uint32_t> words((dump_end - dump_start) / 4);
+        std::memcpy(words.data(), rdram + (dump_start - 0x80000000u), words.size() * 4);
+        for (uint32_t& w : words) {
+            w = (w >> 24) | ((w >> 8) & 0xFF00) | ((w << 8) & 0xFF0000) | (w << 24);
+        }
+        std::ofstream out{ path, std::ios::binary };
+        out.write(reinterpret_cast<const char*>(words.data()), words.size() * 4);
+        std::ofstream mask_out{ state.dump_dir / ("tick_" + std::to_string(state.tick) + ".mask") };
+        for (const Segment& m : mask) {
+            char line[32];
+            snprintf(line, sizeof(line), "%08X %08X\n", m.start, m.end);
+            mask_out << line;
+        }
+        printf("[bm64 debug] Dumped RDRAM at tick %llu to %s\n", (unsigned long long)state.tick, path.string().c_str());
+    }
+
+    void exit_game(const char* reason) {
+        state.exiting = true;
+        if (state.hash_log) {
+            std::fclose(state.hash_log);
+            state.hash_log = nullptr;
+        }
+        if (state.record_file.is_open()) {
+            state.record_file.close();
+        }
+        printf("[bm64 debug] Exiting at tick %llu: %s\n", (unsigned long long)state.tick, reason);
+        fflush(stdout);
+        ultramodern::quit();
     }
 
     void setup_recording(const char* path) {
@@ -247,6 +415,10 @@ namespace {
 
         std::string hashes = "hash " + std::string(buf, snprintf(buf, sizeof(buf), "%016llX", (unsigned long long)total));
         for (size_t i = 0; i < state.ranges.size() && i < range_hashes.size(); i++) {
+            if (i == 4) {
+                lines.push_back(std::move(hashes));
+                hashes = "    ";
+            }
             snprintf(buf, sizeof(buf), "   %s %08X", state.ranges[i].name.c_str(), (uint32_t)range_hashes[i]);
             hashes += buf;
         }
@@ -284,8 +456,24 @@ namespace {
     }
 }
 
-void bm64::debug::request_overlay_toggle() {
-    overlay_toggle_requested = true;
+void bm64::debug::toggle_overlay() {
+    set_overlay_shown(!overlay_shown);
+}
+
+bool bm64::debug::autostart_requested() {
+    return env("BM64_AUTOSTART") != nullptr;
+}
+
+std::string bm64::debug::environment_error() {
+    if (env("BM64_RECORD") && env("BM64_REPLAY")) {
+        return std::string{ "Both BM64_RECORD and BM64_REPLAY are set, so it's unclear whether to record or replay.\n\n" }
+            + "BM64_RECORD=" + env("BM64_RECORD") + "\nBM64_REPLAY=" + env("BM64_REPLAY") + "\n\n"
+            + "Clear the one you don't want and start the game again, for example in PowerShell:\n"
+            + "    Remove-Item Env:BM64_REPLAY\n"
+            + "or in cmd:\n"
+            + "    set BM64_REPLAY=";
+    }
+    return {};
 }
 
 extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
@@ -310,6 +498,20 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
         else {
             fprintf(stderr, "[bm64 debug] Could not open hash log %s\n", path);
         }
+    }
+    if (env("BM64_DEBUG_OVERLAY")) {
+        set_overlay_shown(true);
+    }
+    state.hash_dead_stacks = env("BM64_HASH_DEAD_STACKS") != nullptr;
+    if (const char* ticks = env("BM64_DUMP_TICKS")) {
+        parse_dump_ticks(ticks);
+    }
+    if (const char* dir = env("BM64_DUMP_DIR")) {
+        state.dump_dir = dir;
+    }
+    state.exit_on_replay_end = env("BM64_EXIT_ON_REPLAY_END") != nullptr;
+    if (const char* tick = env("BM64_EXIT_TICK")) {
+        state.exit_tick = std::strtoll(tick, nullptr, 10);
     }
     if (const char* seed = env("BM64_SEED")) {
         state.seed_forced = parse_hex(seed, state.forced_seed);
@@ -395,24 +597,43 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
 extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
     int32_t overlay_id = _arg<0, int32_t>(rdram, ctx);
 
-    if (overlay_toggle_requested.exchange(false)) {
-        state.overlay_shown = !state.overlay_shown;
-        recompui::set_debug_overlay_shown(state.overlay_shown);
+    if (state.exiting) {
+        return;
+    }
+    if (state.exit_tick >= 0 && state.tick >= static_cast<uint64_t>(state.exit_tick)) {
+        exit_game("BM64_EXIT_TICK reached");
+        return;
+    }
+    if (state.exit_on_replay_end && state.input_mode == InputMode::ReplayEnded) {
+        exit_game("replay ended");
+        return;
     }
 
-    bool update_overlay = state.overlay_shown && (state.tick % 4) == 0;
+    bool dump = std::find(state.dump_ticks.begin(), state.dump_ticks.end(), state.tick) != state.dump_ticks.end();
+    bool update_overlay = overlay_shown && (state.tick % 4) == 0;
+    std::vector<Segment> mask;
+    if ((state.hash_log || update_overlay || dump) && !state.hash_dead_stacks) {
+        mask = dead_stacks(rdram);
+    }
+    if (dump) {
+        dump_rdram(rdram, mask);
+    }
+
     if (state.hash_log || update_overlay) {
         std::vector<uint64_t> range_hashes;
         range_hashes.reserve(state.ranges.size());
         XXH3_state_t* total = XXH3_createState();
+        XXH3_state_t* range = XXH3_createState();
         XXH3_64bits_reset(total);
         for (const HashRange& r : state.ranges) {
-            const uint8_t* base = rdram + (r.start - 0x80000000u);
-            size_t len = r.end - r.start;
-            range_hashes.push_back(XXH3_64bits(base, len));
-            XXH3_64bits_update(total, base, len);
+            XXH3_64bits_reset(range);
+            for (const Segment& s : r.segments) {
+                hash_segment(rdram, s, mask, range, total);
+            }
+            range_hashes.push_back(XXH3_64bits_digest(range));
         }
         uint64_t total_hash = XXH3_64bits_digest(total);
+        XXH3_freeState(range);
         XXH3_freeState(total);
 
         if (state.hash_log) {

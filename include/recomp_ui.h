@@ -57,6 +57,7 @@ namespace recompui {
     ContextId try_close_current_context();
 
     ContextId get_launcher_context_id();
+    bool try_autostart_game();
     ContextId get_config_context_id();
     ContextId get_config_sub_menu_context_id();
 
@@ -93,6 +94,7 @@ namespace recompui {
     void init_debug_overlay();
     void set_debug_overlay_shown(bool shown);
     void set_debug_overlay_lines(const std::vector<std::string>& lines);
+    void note_debug_overlay_drawn(Rml::Context* context);
     void open_choice_prompt(
         const std::string& header_text,
         const std::string& content_text,
