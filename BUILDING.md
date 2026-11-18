@@ -4,8 +4,20 @@ This guide will help you build the project on your local machine. The process wi
 
 These steps cover: decompressing the ROM, running the recompiler and finally building the project.
 
-## 1. Building the Bomberman 64 decompilation
-You will need a decompressed ROM. Build the project at https://github.com/Bomberhackers/bm64 which will generate a decompressed ROM from an existing locally dumped BM64 US ROM.
+## Windows quick path
+
+`tools/build-windows.ps1` does every step below on Windows: it downloads portable LLVM 19.1.3 and builds N64Recomp at the commit CI uses (into `../toolchain` by default), generates the decompressed ROM from your retail ROM, runs the recompilers, and builds with Ninja and Visual Studio's `clang-cl`.
+
+```powershell
+$env:BM64_ROM = "C:\path\to\Bomberman 64 (USA).z64"
+powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1            # RelWithDebInfo into build/
+powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1 -Config Debug -BuildDir build-debug
+```
+
+Requirements: Visual Studio 2022 or newer with "Desktop development with C++" and "C++ Clang tools", CMake, git, and Python 3 with `pip install rabbitizer`. `make` is optional: without it, CMake builds `patches/` through `patches/build_patches.cmake`.
+
+## 1. Getting a decompressed ROM
+You will need a decompressed ROM (`bm64.decomp.us.z64`). Either run `python tools/re/make_decomp_rom.py` (needs `pip install rabbitizer` and env `BM64_ROM` pointing at your retail US ROM; it writes the retail image plus decompressed overlays at the offsets in `BM64Syms`), or build the project at https://github.com/Bomberhackers/bm64 which will generate a decompressed ROM from an existing locally dumped BM64 US ROM.
 
 ## 2. Clone the Bomberman 64 Recompiled Repository
 This project makes use of submodules so you will need to clone the repository with the `--recurse-submodules` flag.

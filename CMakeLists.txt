@@ -120,8 +120,15 @@ if(NOT DEFINED PATCHES_LD)
     set(PATCHES_LD ld.lld)
 endif()
 
+find_program(PATCHES_MAKE make)
+if(PATCHES_MAKE)
+    set(PATCHES_BUILD_COMMAND ${CMAKE_COMMAND} -E env CC=${PATCHES_C_COMPILER} LD=${PATCHES_LD} ${PATCHES_MAKE})
+else()
+    set(PATCHES_BUILD_COMMAND ${CMAKE_COMMAND} -DCC=${PATCHES_C_COMPILER} -DLD=${PATCHES_LD} -P ${CMAKE_SOURCE_DIR}/patches/build_patches.cmake)
+endif()
+
 add_custom_target(PatchesBin
-    COMMAND ${CMAKE_COMMAND} -E env CC=${PATCHES_C_COMPILER} LD=${PATCHES_LD} make
+    COMMAND ${PATCHES_BUILD_COMMAND}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/patches
     BYPRODUCTS ${CMAKE_SOURCE_DIR}/patches/patches.elf
 )
