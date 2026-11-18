@@ -190,18 +190,39 @@ recompui::ContextId create_context_impl(Rml::ElementDocument* document) {
 }
 
 void recompui::init_styling(const std::filesystem::path& rcss_file) {
-    std::string style{};
-    {
-        std::ifstream style_stream{rcss_file};
-        style_stream.seekg(0, std::ios::end);
-        style.resize(style_stream.tellg());
-        style_stream.seekg(0, std::ios::beg);
-
-        style_stream.read(style.data(), style.size());
+    std::ifstream style_stream{rcss_file, std::ios::binary};
+    if (!style_stream) {
+        const std::string message =
+            "Could not open the UI stylesheet:\n" + rcss_file.string() +
+            "\n\nThe assets folder was not in the current directory, next to the executable, or in the folder above it.";
+        recompui::message_box(message.c_str());
+        ultramodern::error_handling::quick_exit(__FILE__, __LINE__, __FUNCTION__);
     }
+
+    style_stream.seekg(0, std::ios::end);
+    const std::streamoff size = style_stream.tellg();
+    if (size < 0) {
+        recompui::message_box("Could not read the UI stylesheet.");
+        ultramodern::error_handling::quick_exit(__FILE__, __LINE__, __FUNCTION__);
+    }
+
+    // A failed open used to reach resize(tellg()) with tellg() == -1. That throws
+    // std::length_error on the render thread and abort()s the process with no dialog.
+    std::string style(static_cast<size_t>(size), '\0');
+    style_stream.seekg(0, std::ios::beg);
+    style_stream.read(style.data(), static_cast<std::streamsize>(size));
+    if (!style_stream) {
+        recompui::message_box("Could not read the UI stylesheet.");
+        ultramodern::error_handling::quick_exit(__FILE__, __LINE__, __FUNCTION__);
+    }
+
     std::unique_ptr<Rml::StreamMemory> rml_stream = std::make_unique<Rml::StreamMemory>(reinterpret_cast<Rml::byte*>(style.data()), style.size());
     rml_stream->SetSourceURL(rcss_file.filename().string());
     context_state.style_sheet = Rml::Factory::InstanceStyleSheetStream(rml_stream.get());
+    if (!context_state.style_sheet) {
+        recompui::message_box("Could not parse the UI stylesheet.");
+        ultramodern::error_handling::quick_exit(__FILE__, __LINE__, __FUNCTION__);
+    }
 }
 
 recompui::ContextId recompui::create_context(const std::filesystem::path& path) {
@@ -211,6 +232,11 @@ recompui::ContextId recompui::create_context(const std::filesystem::path& path) 
 
     new_context.open();
     Rml::ElementDocument* doc = recompui::load_document(path.string());
+    if (doc == nullptr) {
+        const std::string message = "Could not open UI file:\n" + path.string();
+        recompui::message_box(message.c_str());
+        ultramodern::error_handling::quick_exit(__FILE__, __LINE__, __FUNCTION__);
+    }
     opened_context->document = doc;
     opened_context->root_element.base = doc;
     new_context.close();

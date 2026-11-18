@@ -70,23 +70,27 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
 
 ## Phase 1 – Local multiplayer
 
-- [ ] **1.1 Four controller ports**
+- [x] **1.1 Four controller ports**
   - Depends on: 0.1.
   - Work: extend `recomp::get_n64_input` (`src/game/controls.cpp`) and `recomp::get_connected_device_info` (`src/game/input.cpp`) to ports 0–3. Assign SDL controllers to ports; keyboard stays on port 0.
   - Done when: the battle setup menu sees 4 controllers.
-- [ ] **1.2 Per-player bindings and port assignment UI**
+  - Note: `src/game/input.cpp` assigns each SDL controller to one port. Auto fills ports 0–3 in connection order; None leaves a port without a pad. Port 0 stays connected because the keyboard also drives it. A port reads only its own controller, so sticks and buttons do not bleed. With four controllers assigned, `get_n64_input` returns true for ports 0–3 and the battle setup menu treats them as plugged in.
+- [x] **1.2 Per-player bindings and port assignment UI**
   - Depends on: 1.1.
   - Work: the config menu lets you choose which device drives which port, with bindings per port.
   - Done when: settings persist across restarts.
-- [ ] **1.3 Cheats are multiplayer-safe**
+  - Note: Controls tab in `assets/config_menu/controls.rml` has Port 1–4, a Controller dropdown (Auto, None, or a connected pad), and that port's bindings. Keyboard bindings stay on port 1 only. Saved in `controls.json` as `ports` (device id plus bindings). An older `controller` block is applied to every port. Closing the menu saves, same as the other tabs.
+- [x] **1.3 Cheats are multiplayer-safe**
   - Depends on: 1.1.
   - Work: `Recomp_ProcessCheats` must not call `osContGetReadData` itself; read port 0 from `D_802AC410` after `func_8023A104` instead. Add a global "cheats disabled" flag for netplay.
   - Done when: cheats still work offline and can be turned off by code.
-  - Note: the "turned off by code" half exists. `bm64_cheats_allowed()` in `src/game/bm64_debug.cpp` already skips cheats while recording or replaying; extend it for netplay.
-- [ ] **1.4 Verify local Battle**
+  - Note: the main loop samples pads first, then calls `Recomp_ProcessCheats`, which reads `D_802AC410[0]` (moonjump still tests `0x2000` on port 0). `bm64::debug::set_cheats_disabled` makes `bm64_cheats_allowed()` return false; recording and replay already did. `BM64_DISABLE_CHEATS=1` sets the flag at boot. Offline play leaves it false, so cheats still run.
+- [x] **1.4 Verify local Battle**
   - Depends on: 1.1–1.3.
   - Work: play 4-human and mixed human/AI matches on several arenas.
   - Done when: no input bleed between ports; findings noted.
+  - Note: Host-side reads are per port: keyboard is added only on port 0, and each pad is read only for its assigned port. Opening `build\BM64Recompiled.exe` from Explorer used to abort before the launcher (see game-internals, Launch); it now finds `assets` in the repo root.
+  - Note (2026-11-18): the user played local multiplayer with 2 players and accepted Phase 1 as complete. No input bleed was reported for the 2-player case. 4-human and mixed human/AI matches on several arenas were not played in this session.
 
 ## Phase 2 – Determinism
 

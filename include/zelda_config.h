@@ -16,8 +16,9 @@ namespace zelda64 {
     
     void reset_input_bindings();
     void reset_cont_input_bindings();
+    void reset_cont_port_bindings(int port);
     void reset_kb_input_bindings();
-    void reset_single_input_binding(recomp::InputDevice device, recomp::GameInput input);
+    void reset_single_input_binding(recomp::InputDevice device, recomp::GameInput input, int port = 0);
 
     std::filesystem::path get_app_folder_path();
     

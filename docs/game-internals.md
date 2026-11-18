@@ -15,6 +15,7 @@ Companion document: [online-play-plan.md](online-play-plan.md).
 - **Build**: `tools/build-windows.ps1` (see `BUILDING.md`). The toolchain (portable LLVM 19.1.3 for the MIPS patches, N64Recomp at commit `98bf104b`) lives in `..\toolchain` next to the repo.
   - MSVC 14.51's standard library rejects clang older than 20, so the game builds with VS 18's clang-cl 22.
   - Clang 20+ conflicts with SDL 2.26's `SDL_endian.h` `_m_prefetch` definition; `-D__PRFCHWINTRIN_H` skips it.
+- **Launch** (verified 2026-11-17): `zelda64::get_program_path()` is the base for `assets/` and `recompcontrollerdb.txt`. It stays empty (paths relative to the working directory) when that directory contains `assets/recomp.rcss`. Otherwise it uses the executable's directory, then that directory's parent, so double-clicking `build\BM64Recompiled.exe` finds the repo's `assets`. Before that search existed, opening the exe (working directory = `build`, which has no `assets`) died in `recompui::init_styling`: a failed `ifstream` makes `tellg()` return -1, `std::string::resize` of that value throws `std::length_error` on the render thread, and the uncaught exception `abort()`s. Windows reports that as `0xC0000409` (`FAST_FAIL_FATAL_APP_EXIT`, subcode 7) in `ucrtbase.dll`, with no window left open. A missing stylesheet or UI document now shows a message box and exits with a failure status instead.
 - **Recompiler config**: `bm64.us.toml` (22 code hooks plus 68,255 instruction patches, mostly screen-size and null-pointer fixes). `patches.toml` configures the MIPS patch build.
 - **Analysis toolkit**: `tools/re/` (Python 3.10 with `rabbitizer`). Scripts find `BM64Syms` in this repo, its parent folder, or env `BM64_SYMS_ROOT`.
 
@@ -70,8 +71,8 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
 
 - **Main loop** (verified): `func_80225840`, already re-implemented in `patches/required_patches.c`. One iteration is one game tick:
   0. `bm64_debug_tick()` (state hash, dumps), then the texture scroll `func_8022997C` if the previous tick submitted a frame (recomp: moved from the render thread, see section 9)
-  1. `Recomp_ProcessCheats()` (recomp addition; calls `osContGetReadData` directly)
-  2. `func_8023A104()`: wait for controller data and update input history (section 5)
+  1. `func_8023A104()`: wait for controller data and update input history (section 5)
+  2. `Recomp_ProcessCheats()` (recomp addition; reads port 0 from `D_802AC410` after that sample, and only if `bm64_cheats_allowed()`)
   3. `Gfx_InitGfx()`
   4. `ThreadProc_RunQueuedThreads()` and `func_802381F8()` (start or yield to queued OS threads; in practice the render thread)
   5. `HuPrcCall()`: run all Hudson processes (all gameplay logic)
@@ -135,8 +136,8 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
   - Menu helper `func_8027F0C4` and `func_8027EDC8`: port 0, or all 4 ports ORed together.
   - Others: `func_8023AEDC` (from `func_8023BBCC`), `func_8023E1D8`, `func_802437C0`, `func_802437E0`, `func_8026CFF4`, `func_80295B80`, `func_80297A34`, `func_8023A3E0`, `func_802441F4`.
   - Overlay menus call `func_802399AC`, `func_8023A038` and `func_80239FF8` through stubs.
-- **Recomp limitation**: `recomp::get_n64_input` (`src/game/controls.cpp`) returns false for `controller_num != 0`, and `recomp::get_connected_device_info` (`src/game/input.cpp`) reports only port 0. Local multiplayer doesn't work until both are extended.
-- **Cheats**: `Recomp_ProcessCheats` reads `osContGetReadData` itself and writes `g_Players[0]`, lives and credits. This must be disabled or synced in netplay.
+- **Host ports** (Phase 1): `recomp::get_n64_input` and `recomp::get_connected_device_info` cover ports 0–3. Port 0 is always connected because the keyboard feeds it. Each SDL controller is assigned to one port (Auto fills ports in connection order; the Controls tab assigns a device, or None). A port's buttons and stick come only from that port's controller and that port's bindings. Ports 1–3 report disconnected until a controller is assigned, which is what the battle setup menu uses (`func_8023A038` errno). Controller bindings are stored per port in `controls.json` under `ports`; an older single `controller` block is copied onto every port. Four-port support is implemented. On 2026-11-18 the user confirmed 2-player local play. 4-player and mixed human/AI matches were not played.
+- **Cheats**: `Recomp_ProcessCheats` runs after `func_8023A104` and reads port 0 from `D_802AC410` (the filtered sample). It still writes `g_Players[0]`, lives and credits. `bm64_cheats_allowed()` is false while recording, replaying, or when `bm64::debug::set_cheats_disabled(true)` (also `BM64_DISABLE_CHEATS=1`). Netplay uses that flag.
 
 ---
 
@@ -300,7 +301,7 @@ Host side: `src/game/bm64_debug.cpp` (`include/bm64_debug.h`). Overlay UI: `src/
 | `bm64_debug_boot()` | First line of `func_80225840`, before the boot save read |
 | `bm64_session_seed(default)` | Wraps the `g_initRandom` seed |
 | `bm64_debug_tick(gOverlayID)` | Top of every main-loop iteration |
-| `bm64_cheats_allowed()` | Gates `Recomp_ProcessCheats` (off while recording or replaying) |
+| `bm64_cheats_allowed()` | Gates `Recomp_ProcessCheats` (off while recording, replaying, or when cheats are disabled for netplay) |
 | `bm64_input_filter(pads)` | Inside `func_8023A104`, after the controller read |
 
 - **Environment variables** (read once at boot; the full list is in `include/bm64_debug.h`):

@@ -272,63 +272,92 @@ bool load_general_config(const std::filesystem::path& path) {
     return true;
 }
 
-void assign_mapping(recomp::InputDevice device, recomp::GameInput input, const std::vector<recomp::InputField>& value) {
+void assign_mapping(recomp::InputDevice device, recomp::GameInput input, const std::vector<recomp::InputField>& value, int port) {
     for (size_t binding_index = 0; binding_index < std::min(value.size(), recomp::bindings_per_input); binding_index++) {
-        recomp::set_input_binding(input, binding_index, device, value[binding_index]);
+        recomp::set_input_binding(input, binding_index, device, value[binding_index], port);
     }
 };
 
 // same as assign_mapping, except will clear unassigned bindings if not in value
-void assign_mapping_complete(recomp::InputDevice device, recomp::GameInput input, const std::vector<recomp::InputField>& value) {
+void assign_mapping_complete(recomp::InputDevice device, recomp::GameInput input, const std::vector<recomp::InputField>& value, int port) {
     for (size_t binding_index = 0; binding_index < recomp::bindings_per_input; binding_index++) {
         if (binding_index >= value.size()) {
-            recomp::set_input_binding(input, binding_index, device, recomp::InputField{});
+            recomp::set_input_binding(input, binding_index, device, recomp::InputField{}, port);
         } else {
-            recomp::set_input_binding(input, binding_index, device, value[binding_index]);
+            recomp::set_input_binding(input, binding_index, device, value[binding_index], port);
         }
     }
 };
 
-void assign_all_mappings(recomp::InputDevice device, const recomp::DefaultN64Mappings& values) {
-    assign_mapping_complete(device, recomp::GameInput::A, values.a);
-    assign_mapping_complete(device, recomp::GameInput::B, values.b);
-    assign_mapping_complete(device, recomp::GameInput::Z, values.z);
-    assign_mapping_complete(device, recomp::GameInput::START, values.start);
-    assign_mapping_complete(device, recomp::GameInput::DPAD_UP, values.dpad_up);
-    assign_mapping_complete(device, recomp::GameInput::DPAD_DOWN, values.dpad_down);
-    assign_mapping_complete(device, recomp::GameInput::DPAD_LEFT, values.dpad_left);
-    assign_mapping_complete(device, recomp::GameInput::DPAD_RIGHT, values.dpad_right);
-    assign_mapping_complete(device, recomp::GameInput::L, values.l);
-    assign_mapping_complete(device, recomp::GameInput::R, values.r);
-    assign_mapping_complete(device, recomp::GameInput::C_UP, values.c_up);
-    assign_mapping_complete(device, recomp::GameInput::C_DOWN, values.c_down);
-    assign_mapping_complete(device, recomp::GameInput::C_LEFT, values.c_left);
-    assign_mapping_complete(device, recomp::GameInput::C_RIGHT, values.c_right);
+void assign_all_mappings(recomp::InputDevice device, const recomp::DefaultN64Mappings& values, int port) {
+    if (device == recomp::InputDevice::Controller && port < 0) {
+        for (int cur_port = 0; cur_port < recomp::num_controller_ports; cur_port++) {
+            assign_all_mappings(device, values, cur_port);
+        }
+        return;
+    }
 
-    assign_mapping_complete(device, recomp::GameInput::X_AXIS_NEG, values.analog_left);
-    assign_mapping_complete(device, recomp::GameInput::X_AXIS_POS, values.analog_right);
-    assign_mapping_complete(device, recomp::GameInput::Y_AXIS_NEG, values.analog_down);
-    assign_mapping_complete(device, recomp::GameInput::Y_AXIS_POS, values.analog_up);
+    assign_mapping_complete(device, recomp::GameInput::A, values.a, port);
+    assign_mapping_complete(device, recomp::GameInput::B, values.b, port);
+    assign_mapping_complete(device, recomp::GameInput::Z, values.z, port);
+    assign_mapping_complete(device, recomp::GameInput::START, values.start, port);
+    assign_mapping_complete(device, recomp::GameInput::DPAD_UP, values.dpad_up, port);
+    assign_mapping_complete(device, recomp::GameInput::DPAD_DOWN, values.dpad_down, port);
+    assign_mapping_complete(device, recomp::GameInput::DPAD_LEFT, values.dpad_left, port);
+    assign_mapping_complete(device, recomp::GameInput::DPAD_RIGHT, values.dpad_right, port);
+    assign_mapping_complete(device, recomp::GameInput::L, values.l, port);
+    assign_mapping_complete(device, recomp::GameInput::R, values.r, port);
+    assign_mapping_complete(device, recomp::GameInput::C_UP, values.c_up, port);
+    assign_mapping_complete(device, recomp::GameInput::C_DOWN, values.c_down, port);
+    assign_mapping_complete(device, recomp::GameInput::C_LEFT, values.c_left, port);
+    assign_mapping_complete(device, recomp::GameInput::C_RIGHT, values.c_right, port);
 
-    assign_mapping_complete(device, recomp::GameInput::TOGGLE_MENU, values.toggle_menu);
-    assign_mapping_complete(device, recomp::GameInput::ACCEPT_MENU, values.accept_menu);
-    assign_mapping_complete(device, recomp::GameInput::APPLY_MENU, values.apply_menu);
+    assign_mapping_complete(device, recomp::GameInput::X_AXIS_NEG, values.analog_left, port);
+    assign_mapping_complete(device, recomp::GameInput::X_AXIS_POS, values.analog_right, port);
+    assign_mapping_complete(device, recomp::GameInput::Y_AXIS_NEG, values.analog_down, port);
+    assign_mapping_complete(device, recomp::GameInput::Y_AXIS_POS, values.analog_up, port);
+
+    assign_mapping_complete(device, recomp::GameInput::TOGGLE_MENU, values.toggle_menu, port);
+    assign_mapping_complete(device, recomp::GameInput::ACCEPT_MENU, values.accept_menu, port);
+    assign_mapping_complete(device, recomp::GameInput::APPLY_MENU, values.apply_menu, port);
 };
 
+void copy_controller_port_bindings(int from_port, int to_port) {
+    for (size_t i = 0; i < recomp::get_num_inputs(); i++) {
+        recomp::GameInput input = static_cast<recomp::GameInput>(i);
+        for (size_t binding_index = 0; binding_index < recomp::bindings_per_input; binding_index++) {
+            recomp::set_input_binding(
+                input,
+                binding_index,
+                recomp::InputDevice::Controller,
+                recomp::get_input_binding(input, binding_index, recomp::InputDevice::Controller, from_port),
+                to_port
+            );
+        }
+    }
+}
+
 void zelda64::reset_input_bindings() {
-    assign_all_mappings(recomp::InputDevice::Keyboard, recomp::default_n64_keyboard_mappings);
-    assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings);
+    assign_all_mappings(recomp::InputDevice::Keyboard, recomp::default_n64_keyboard_mappings, 0);
+    assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings, -1);
+    for (int port = 0; port < recomp::num_controller_ports; port++) {
+        recomp::set_port_device(port, {});
+    }
 }
 
 void zelda64::reset_cont_input_bindings() {
-    assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings);
+    assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings, -1);
+}
+
+void zelda64::reset_cont_port_bindings(int port) {
+    assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings, port);
 }
 
 void zelda64::reset_kb_input_bindings() {
-    assign_all_mappings(recomp::InputDevice::Keyboard, recomp::default_n64_keyboard_mappings);
+    assign_all_mappings(recomp::InputDevice::Keyboard, recomp::default_n64_keyboard_mappings, 0);
 }
 
-void zelda64::reset_single_input_binding(recomp::InputDevice device, recomp::GameInput input) {
+void zelda64::reset_single_input_binding(recomp::InputDevice device, recomp::GameInput input, int port) {
     assign_mapping_complete(
         device,
         input,
@@ -337,7 +366,8 @@ void zelda64::reset_single_input_binding(recomp::InputDevice device, recomp::Gam
                 recomp::default_n64_keyboard_mappings :
                 recomp::default_n64_controller_mappings,
             input
-        )
+        ),
+        port
     );
 }
 
@@ -374,32 +404,69 @@ bool load_graphics_config(const std::filesystem::path& path) {
     return true;
 }
 
-void add_input_bindings(nlohmann::json& out, recomp::GameInput input, recomp::InputDevice device) {
+void add_input_bindings(nlohmann::json& out, recomp::GameInput input, recomp::InputDevice device, int port) {
     const std::string& input_name = recomp::get_input_enum_name(input);
     nlohmann::json& out_array = out[input_name];
     out_array = nlohmann::json::array();
     for (size_t binding_index = 0; binding_index < recomp::bindings_per_input; binding_index++) {
-        out_array[binding_index] = recomp::get_input_binding(input, binding_index, device);
+        out_array[binding_index] = recomp::get_input_binding(input, binding_index, device, port);
     }
 };
+
+std::string port_device_to_string(const recomp::PortDeviceConfig& config) {
+    switch (config.mode) {
+    case recomp::PortDeviceMode::None:
+        return "none";
+    case recomp::PortDeviceMode::Device:
+        return config.device_id.empty() ? "none" : config.device_id;
+    case recomp::PortDeviceMode::Auto:
+    default:
+        return "auto";
+    }
+}
+
+recomp::PortDeviceConfig port_device_from_string(const std::string& device) {
+    recomp::PortDeviceConfig config{};
+    if (device == "none") {
+        config.mode = recomp::PortDeviceMode::None;
+    }
+    else if (device == "auto" || device.empty()) {
+        config.mode = recomp::PortDeviceMode::Auto;
+    }
+    else {
+        config.mode = recomp::PortDeviceMode::Device;
+        config.device_id = device;
+    }
+    return config;
+}
 
 bool save_controls_config(const std::filesystem::path& path) {
     nlohmann::json config_json{};
 
     config_json["keyboard"] = {};
-    config_json["controller"] = {};
+    config_json["ports"] = nlohmann::json::array();
 
     for (size_t i = 0; i < recomp::get_num_inputs(); i++) {
-        recomp::GameInput cur_input = static_cast<recomp::GameInput>(i);
-
-        add_input_bindings(config_json["keyboard"], cur_input, recomp::InputDevice::Keyboard);
-        add_input_bindings(config_json["controller"], cur_input, recomp::InputDevice::Controller);
+        add_input_bindings(config_json["keyboard"], static_cast<recomp::GameInput>(i), recomp::InputDevice::Keyboard, 0);
     }
+
+    for (int port = 0; port < recomp::num_controller_ports; port++) {
+        nlohmann::json port_json{};
+        port_json["device"] = port_device_to_string(recomp::get_port_device(port));
+        port_json["controller"] = nlohmann::json::object();
+        for (size_t i = 0; i < recomp::get_num_inputs(); i++) {
+            add_input_bindings(port_json["controller"], static_cast<recomp::GameInput>(i), recomp::InputDevice::Controller, port);
+        }
+        config_json["ports"].push_back(std::move(port_json));
+    }
+
+    // Older builds read a single controller mapping. Keep port 0's bindings there.
+    config_json["controller"] = config_json["ports"][0]["controller"];
 
     return save_json_with_backups(path, config_json);
 }
 
-bool load_input_device_from_json(const nlohmann::json& config_json, recomp::InputDevice device, const std::string& key) {
+bool load_input_device_from_json(const nlohmann::json& config_json, recomp::InputDevice device, const std::string& key, int port) {
     // Check if the json object for the given key exists.
     auto find_it = config_json.find(key);
     if (find_it == config_json.end()) {
@@ -423,7 +490,8 @@ bool load_input_device_from_json(const nlohmann::json& config_json, recomp::Inpu
                     recomp::default_n64_keyboard_mappings :
                     recomp::default_n64_controller_mappings,
                     cur_input
-                )
+                ),
+                port
             );
             continue;
         }
@@ -433,7 +501,7 @@ bool load_input_device_from_json(const nlohmann::json& config_json, recomp::Inpu
         for (size_t binding_index = 0; binding_index < std::min(recomp::bindings_per_input, input_json.size()); binding_index++) {
             recomp::InputField cur_field{};
             recomp::from_json(input_json[binding_index], cur_field);
-            recomp::set_input_binding(cur_input, binding_index, device, cur_field);
+            recomp::set_input_binding(cur_input, binding_index, device, cur_field, port);
         }
     }
 
@@ -446,12 +514,38 @@ bool load_controls_config(const std::filesystem::path& path) {
         return false;
     }
 
-    if (!load_input_device_from_json(config_json, recomp::InputDevice::Keyboard, "keyboard")) {
-        assign_all_mappings(recomp::InputDevice::Keyboard, recomp::default_n64_keyboard_mappings);
+    if (!load_input_device_from_json(config_json, recomp::InputDevice::Keyboard, "keyboard", 0)) {
+        assign_all_mappings(recomp::InputDevice::Keyboard, recomp::default_n64_keyboard_mappings, 0);
     }
 
-    if (!load_input_device_from_json(config_json, recomp::InputDevice::Controller, "controller")) {
-        assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings);
+    const auto ports_it = config_json.find("ports");
+    if (ports_it != config_json.end() && ports_it->is_array()) {
+        for (int port = 0; port < recomp::num_controller_ports; port++) {
+            if (port >= static_cast<int>(ports_it->size()) || !(*ports_it)[port].is_object()) {
+                assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings, port);
+                recomp::set_port_device(port, {});
+                continue;
+            }
+            const nlohmann::json& port_json = (*ports_it)[port];
+            recomp::set_port_device(port, port_device_from_string(port_json.value("device", std::string("auto"))));
+            if (!load_input_device_from_json(port_json, recomp::InputDevice::Controller, "controller", port)) {
+                assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings, port);
+            }
+        }
+        return true;
+    }
+
+    // Configs written before per-port bindings stored one controller mapping. Apply it to every port.
+    if (!load_input_device_from_json(config_json, recomp::InputDevice::Controller, "controller", 0)) {
+        assign_all_mappings(recomp::InputDevice::Controller, recomp::default_n64_controller_mappings, -1);
+    }
+    else {
+        for (int port = 1; port < recomp::num_controller_ports; port++) {
+            copy_controller_port_bindings(0, port);
+        }
+    }
+    for (int port = 0; port < recomp::num_controller_ports; port++) {
+        recomp::set_port_device(port, {});
     }
     return true;
 }

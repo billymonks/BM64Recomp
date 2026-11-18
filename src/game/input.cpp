@@ -1,5 +1,9 @@
+#include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "ultramodern/ultramodern.hpp"
 #include "recomp.h"
@@ -12,6 +16,13 @@
 #include "GamepadMotion.hpp"
 
 constexpr float axis_threshold = 0.5f;
+
+struct LiveController {
+    SDL_GameController* controller = nullptr;
+    SDL_JoystickID instance = -1;
+    std::string id;
+    std::string label;
+};
 
 struct ControllerState {
     SDL_GameController* controller;
@@ -39,9 +50,23 @@ static struct {
     std::array<float, 2> pending_rotation_delta{};
     std::array<float, 2> pending_mouse_delta{};
 
-    float cur_rumble;
-    bool rumble_active;
+    std::array<recomp::PortDeviceConfig, recomp::num_controller_ports> port_config{};
+    std::array<SDL_GameController*, recomp::num_controller_ports> port_controllers{};
+    std::vector<LiveController> live_controllers{};
+
+    std::array<float, recomp::num_controller_ports> cur_rumble{};
+    std::array<bool, recomp::num_controller_ports> rumble_active{};
 } InputState;
+
+static void (*controllers_changed_callback)() = nullptr;
+static std::atomic<int> input_editing_port{ 0 };
+static std::atomic<int> active_scanning_port{ 0 };
+
+static void notify_controllers_changed() {
+    if (controllers_changed_callback != nullptr) {
+        controllers_changed_callback();
+    }
+}
 
 static struct {
     std::list<std::filesystem::path> files_dropped;
@@ -70,6 +95,7 @@ recomp::InputField recomp::get_scanned_input() {
 }
 
 void recomp::start_scanning_input(recomp::InputDevice device) {
+    active_scanning_port.store(input_editing_port.load());
     scanned_input.store({});
     scanning_device.store(device);
 }
@@ -82,6 +108,310 @@ void queue_if_enabled(SDL_Event* event) {
     if (!recomp::all_input_disabled()) {
         recompui::queue_event(*event);
     }
+}
+
+static int clamp_port(int port) {
+    if (port < 0 || port >= recomp::num_controller_ports) {
+        return 0;
+    }
+    return port;
+}
+
+static std::string controller_stable_id(SDL_GameController* controller, std::unordered_map<std::string, int>& guid_counts) {
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
+    const char* path = nullptr;
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    if (joystick != nullptr) {
+        path = SDL_JoystickPath(joystick);
+    }
+#endif
+    if (path != nullptr && path[0] != '\0') {
+        return std::string("path:") + path;
+    }
+
+    char guid[33] = {};
+    if (joystick != nullptr) {
+        SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick), guid, sizeof(guid));
+    }
+    int ordinal = guid_counts[guid]++;
+    return std::string("guid:") + guid + "#" + std::to_string(ordinal);
+}
+
+static bool joystick_instance_on_port_locked(int32_t joystick_instance, int port) {
+    SDL_GameController* controller = InputState.port_controllers[clamp_port(port)];
+    if (controller == nullptr) {
+        return false;
+    }
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
+    return joystick != nullptr && SDL_JoystickInstanceID(joystick) == joystick_instance;
+}
+
+static int port_for_joystick_locked(int32_t joystick_instance) {
+    for (int port = 0; port < recomp::num_controller_ports; port++) {
+        if (joystick_instance_on_port_locked(joystick_instance, port)) {
+            return port;
+        }
+    }
+    return -1;
+}
+
+static const LiveController* find_live_locked(SDL_GameController* controller) {
+    for (const LiveController& live : InputState.live_controllers) {
+        if (live.controller == controller) {
+            return &live;
+        }
+    }
+    return nullptr;
+}
+
+static void rebuild_port_assignment_locked() {
+    std::vector<LiveController> live;
+    for (const auto& [instance, state] : InputState.controller_states) {
+        if (state.controller == nullptr) {
+            continue;
+        }
+        LiveController entry{};
+        entry.controller = state.controller;
+        entry.instance = instance;
+        live.push_back(entry);
+    }
+    std::sort(live.begin(), live.end(), [](const LiveController& a, const LiveController& b) {
+        return a.instance < b.instance;
+    });
+
+    std::unordered_map<std::string, int> guid_counts;
+    std::unordered_map<std::string, int> name_counts;
+    std::vector<std::string> names(live.size());
+    std::vector<int> name_ordinal(live.size());
+    for (size_t i = 0; i < live.size(); i++) {
+        live[i].id = controller_stable_id(live[i].controller, guid_counts);
+        const char* name = SDL_GameControllerName(live[i].controller);
+        if (name == nullptr || name[0] == '\0') {
+            name = "Controller";
+        }
+        names[i] = name;
+        name_ordinal[i] = name_counts[names[i]]++;
+    }
+    for (size_t i = 0; i < live.size(); i++) {
+        if (name_counts[names[i]] > 1) {
+            live[i].label = names[i] + " (" + std::to_string(name_ordinal[i] + 1) + ")";
+        }
+        else {
+            live[i].label = names[i];
+        }
+    }
+
+    std::array<SDL_GameController*, recomp::num_controller_ports> assigned{};
+    std::vector<bool> used(live.size(), false);
+    for (int port = 0; port < recomp::num_controller_ports; port++) {
+        if (InputState.port_config[port].mode != recomp::PortDeviceMode::Device) {
+            continue;
+        }
+        const std::string& id = InputState.port_config[port].device_id;
+        for (size_t i = 0; i < live.size(); i++) {
+            if (!used[i] && live[i].id == id) {
+                assigned[port] = live[i].controller;
+                used[i] = true;
+                break;
+            }
+        }
+    }
+
+    size_t next = 0;
+    for (int port = 0; port < recomp::num_controller_ports; port++) {
+        if (InputState.port_config[port].mode != recomp::PortDeviceMode::Auto || assigned[port] != nullptr) {
+            continue;
+        }
+        while (next < live.size() && used[next]) {
+            next++;
+        }
+        if (next >= live.size()) {
+            break;
+        }
+        assigned[port] = live[next].controller;
+        used[next] = true;
+        next++;
+    }
+
+    InputState.port_controllers = assigned;
+    InputState.live_controllers = std::move(live);
+}
+
+static std::vector<recomp::PortDeviceOption> port_device_options_locked(int port) {
+    std::vector<recomp::PortDeviceOption> options;
+    options.push_back({ "", "Auto" });
+    options.push_back({ "", "None" });
+    for (const LiveController& live : InputState.live_controllers) {
+        options.push_back({ live.id, live.label });
+    }
+    port = clamp_port(port);
+    if (InputState.port_config[port].mode == recomp::PortDeviceMode::Device) {
+        const std::string& id = InputState.port_config[port].device_id;
+        bool found = false;
+        for (size_t i = 2; i < options.size(); i++) {
+            if (options[i].id == id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && !id.empty()) {
+            options.push_back({ id, "Disconnected" });
+        }
+    }
+    return options;
+}
+
+static int port_device_option_index_locked(int port, const std::vector<recomp::PortDeviceOption>& options) {
+    port = clamp_port(port);
+    const recomp::PortDeviceConfig& config = InputState.port_config[port];
+    if (config.mode == recomp::PortDeviceMode::None) {
+        return 1;
+    }
+    if (config.mode == recomp::PortDeviceMode::Device) {
+        for (size_t i = 2; i < options.size(); i++) {
+            if (options[i].id == config.device_id) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return 0;
+}
+
+void recomp::set_controllers_changed_callback(void (*callback)()) {
+    controllers_changed_callback = callback;
+}
+
+void recomp::set_input_editing_port(int port) {
+    input_editing_port.store(clamp_port(port));
+}
+
+recomp::PortDeviceConfig recomp::get_port_device(int port) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    return InputState.port_config[clamp_port(port)];
+}
+
+void recomp::set_port_device(int port, const PortDeviceConfig& config) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    InputState.port_config[clamp_port(port)] = config;
+    rebuild_port_assignment_locked();
+}
+
+std::vector<recomp::PortDeviceOption> recomp::port_device_options(int port) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    return port_device_options_locked(port);
+}
+
+int recomp::port_device_option_index(int port) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    return port_device_option_index_locked(port, port_device_options_locked(port));
+}
+
+void recomp::set_port_device_option(int port, int option_index) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    port = clamp_port(port);
+    std::vector<PortDeviceOption> options = port_device_options_locked(port);
+    if (option_index < 0 || option_index >= static_cast<int>(options.size())) {
+        return;
+    }
+    if (option_index == port_device_option_index_locked(port, options)) {
+        return;
+    }
+
+    if (option_index == 0) {
+        InputState.port_config[port] = {};
+    }
+    else if (option_index == 1) {
+        InputState.port_config[port].mode = PortDeviceMode::None;
+        InputState.port_config[port].device_id.clear();
+    }
+    else {
+        const std::string& id = options[option_index].id;
+        for (int other = 0; other < num_controller_ports; other++) {
+            if (other == port) {
+                continue;
+            }
+            if (InputState.port_config[other].mode == PortDeviceMode::Device && InputState.port_config[other].device_id == id) {
+                InputState.port_config[other].mode = PortDeviceMode::None;
+                InputState.port_config[other].device_id.clear();
+            }
+        }
+        InputState.port_config[port].mode = PortDeviceMode::Device;
+        InputState.port_config[port].device_id = id;
+    }
+    rebuild_port_assignment_locked();
+}
+
+std::string recomp::port_assignment_status(int port) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    port = clamp_port(port);
+    const PortDeviceConfig& config = InputState.port_config[port];
+    SDL_GameController* controller = InputState.port_controllers[port];
+    const LiveController* live = find_live_locked(controller);
+
+    std::string pad;
+    if (live != nullptr) {
+        pad = live->label;
+    }
+    else if (config.mode == PortDeviceMode::Device) {
+        pad = "disconnected";
+    }
+
+    if (port == 0) {
+        if (pad.empty()) {
+            return "Keyboard only";
+        }
+        if (pad == "disconnected") {
+            return "Keyboard (saved controller disconnected)";
+        }
+        return "Keyboard and " + pad;
+    }
+    if (config.mode == PortDeviceMode::None) {
+        return "No controller";
+    }
+    if (pad.empty()) {
+        return "No controller yet";
+    }
+    if (pad == "disconnected") {
+        return "Saved controller disconnected";
+    }
+    return pad;
+}
+
+bool recomp::port_is_connected(int port) {
+    if (port < 0 || port >= num_controller_ports) {
+        return false;
+    }
+    if (port == 0) {
+        return true;
+    }
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    return InputState.port_controllers[port] != nullptr;
+}
+
+bool recomp::joystick_is_on_port(int32_t joystick_instance, int port) {
+    if (port < 0 || port >= num_controller_ports) {
+        return false;
+    }
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    return joystick_instance_on_port_locked(joystick_instance, port);
+}
+
+bool recomp::joystick_button_matches(int32_t joystick_instance, int32_t button, GameInput input) {
+    int port = -1;
+    {
+        std::lock_guard lock{ InputState.cur_controllers_mutex };
+        port = port_for_joystick_locked(joystick_instance);
+    }
+    if (port < 0) {
+        return false;
+    }
+    for (size_t binding_index = 0; binding_index < bindings_per_input; binding_index++) {
+        const InputField& field = get_input_binding(input, binding_index, InputDevice::Controller, port);
+        if (field.input_type == static_cast<uint32_t>(InputType::ControllerDigital) && field.input_id == button) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static std::atomic_bool cursor_enabled = true;
@@ -142,13 +472,18 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
             printf("Controller added: %d\n", controller_event->which);
             if (controller != nullptr) {
                 printf("  Instance ID: %d\n", SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)));
-                ControllerState& state = InputState.controller_states[SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller))];
-                state.controller = controller;
-
                 if (SDL_GameControllerHasSensor(controller, SDL_SensorType::SDL_SENSOR_GYRO) && SDL_GameControllerHasSensor(controller, SDL_SensorType::SDL_SENSOR_ACCEL)) {
                     SDL_GameControllerSetSensorEnabled(controller, SDL_SensorType::SDL_SENSOR_GYRO, SDL_TRUE);
                     SDL_GameControllerSetSensorEnabled(controller, SDL_SensorType::SDL_SENSOR_ACCEL, SDL_TRUE);
                 }
+                {
+                    std::lock_guard lock{ InputState.cur_controllers_mutex };
+                    SDL_JoystickID instance = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller));
+                    ControllerState& state = InputState.controller_states[instance];
+                    state.controller = controller;
+                    rebuild_port_assignment_locked();
+                }
+                notify_controllers_changed();
             }
         }
         break;
@@ -156,7 +491,12 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
         {
             SDL_ControllerDeviceEvent* controller_event = &event->cdevice;
             printf("Controller removed: %d\n", controller_event->which);
-            InputState.controller_states.erase(controller_event->which);
+            {
+                std::lock_guard lock{ InputState.cur_controllers_mutex };
+                InputState.controller_states.erase(controller_event->which);
+                rebuild_port_assignment_locked();
+            }
+            notify_controllers_changed();
         }
         break;
     case SDL_EventType::SDL_QUIT: {
@@ -178,14 +518,11 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
         break;
     case SDL_EventType::SDL_CONTROLLERBUTTONDOWN:
         if (scanning_device != recomp::InputDevice::COUNT) {
-            auto menuToggleBinding0 = recomp::get_input_binding(recomp::GameInput::TOGGLE_MENU, 0, recomp::InputDevice::Controller);
-            auto menuToggleBinding1 = recomp::get_input_binding(recomp::GameInput::TOGGLE_MENU, 1, recomp::InputDevice::Controller);
-            // note - magic number: 0 is InputType::None
-            if ((menuToggleBinding0.input_type != 0 && event->cbutton.button == menuToggleBinding0.input_id) ||
-                (menuToggleBinding1.input_type != 0 && event->cbutton.button == menuToggleBinding1.input_id)) {
+            SDL_ControllerButtonEvent* button_event = &event->cbutton;
+            if (recomp::joystick_button_matches(button_event->which, button_event->button, recomp::GameInput::TOGGLE_MENU)) {
                 recomp::cancel_scanning_input();
-            } else if (scanning_device == recomp::InputDevice::Controller) {
-                SDL_ControllerButtonEvent* button_event = &event->cbutton;
+            } else if (scanning_device == recomp::InputDevice::Controller &&
+                       recomp::joystick_is_on_port(button_event->which, active_scanning_port.load())) {
                 auto scanned_input_index = recomp::get_scanned_input_index();
                 if ((scanned_input_index == static_cast<int>(recomp::GameInput::TOGGLE_MENU) ||
                      scanned_input_index == static_cast<int>(recomp::GameInput::ACCEPT_MENU) ||
@@ -205,6 +542,10 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
         break;
     case SDL_EventType::SDL_CONTROLLERAXISMOTION:
         if (scanning_device == recomp::InputDevice::Controller) {
+            SDL_ControllerAxisEvent* axis_event = &event->caxis;
+            if (!recomp::joystick_is_on_port(axis_event->which, active_scanning_port.load())) {
+                break;
+            }
             auto scanned_input_index = recomp::get_scanned_input_index();
             if (scanned_input_index == static_cast<int>(recomp::GameInput::TOGGLE_MENU) ||
                 scanned_input_index == static_cast<int>(recomp::GameInput::ACCEPT_MENU) ||
@@ -212,7 +553,6 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
                 break;
             }
 
-            SDL_ControllerAxisEvent* axis_event = &event->caxis;
             float axis_value = axis_event->value * (1/32768.0f);
             if (axis_value > axis_threshold) {
                 SDL_Event set_stick_return_event;
@@ -266,7 +606,8 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
             float rot_y = 0.0f;
             state.motion.GetPlayerSpaceGyro(rot_x, rot_y);
 
-            {
+            // Gyro aiming is a port-0 camera aid. Other players' sensors must not move it.
+            if (recomp::joystick_is_on_port(event->csensor.which, 0)) {
                 std::lock_guard lock{ InputState.pending_input_mutex };
                 InputState.pending_rotation_delta[0] += rot_x;
                 InputState.pending_rotation_delta[1] += rot_y;
@@ -483,6 +824,7 @@ void recomp::poll_inputs() {
                 InputState.cur_controllers.push_back(controller);
             }
         }
+        rebuild_port_assignment_locked();
     }
 
     // Read the deltas while resetting them to zero.
@@ -516,18 +858,18 @@ void recomp::poll_inputs() {
 }
 
 void recomp::set_rumble(int controller_num, bool on) {
-    if (controller_num == 0) {
-        InputState.rumble_active = on;
+    if (controller_num < 0 || controller_num >= num_controller_ports) {
+        return;
     }
+    InputState.rumble_active[controller_num] = on;
 }
 
 ultramodern::input::connected_device_info_t recomp::get_connected_device_info(int controller_num) {
-    switch (controller_num) {
-        case 0:
-            return ultramodern::input::connected_device_info_t {
-                .connected_device = ultramodern::input::Device::Controller,
-                .connected_pak = ultramodern::input::Pak::RumblePak,
-            };
+    if (port_is_connected(controller_num)) {
+        return ultramodern::input::connected_device_info_t {
+            .connected_device = ultramodern::input::Device::Controller,
+            .connected_pak = ultramodern::input::Pak::RumblePak,
+        };
     }
 
     return ultramodern::input::connected_device_info_t {
@@ -544,24 +886,51 @@ static float smoothstep(float from, float to, float amount) {
 // Update rumble to attempt to mimic the way n64 rumble ramps up and falls off
 void recomp::update_rumble() {
     // Note: values are not accurate! just approximations based on feel
-    if (InputState.rumble_active) {
-        InputState.cur_rumble += 0.17f;
-        if (InputState.cur_rumble > 1) InputState.cur_rumble = 1;
-    } else {
-        InputState.cur_rumble *= 0.92f;
-        InputState.cur_rumble -= 0.01f;
-        if (InputState.cur_rumble < 0) InputState.cur_rumble = 0;
-    }
-    float smooth_rumble = smoothstep(0, 1, InputState.cur_rumble);
-
-    uint16_t rumble_strength = smooth_rumble * (recomp::get_rumble_strength() * 0xFFFF / 100);
     uint32_t duration = 1000000; // Dummy duration value that lasts long enough to matter as the game will reset rumble on its own.
-    {
-        std::lock_guard lock{ InputState.cur_controllers_mutex };
-        for (const auto& controller : InputState.cur_controllers) {
-            SDL_GameControllerRumble(controller, 0, rumble_strength, duration);
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    for (int port = 0; port < num_controller_ports; port++) {
+        float& cur_rumble = InputState.cur_rumble[port];
+        if (InputState.rumble_active[port]) {
+            cur_rumble += 0.17f;
+            if (cur_rumble > 1) cur_rumble = 1;
+        } else {
+            cur_rumble *= 0.92f;
+            cur_rumble -= 0.01f;
+            if (cur_rumble < 0) cur_rumble = 0;
         }
+        SDL_GameController* controller = InputState.port_controllers[port];
+        if (controller == nullptr) {
+            continue;
+        }
+        float smooth_rumble = smoothstep(0, 1, cur_rumble);
+        uint16_t rumble_strength = smooth_rumble * (recomp::get_rumble_strength() * 0xFFFF / 100);
+        SDL_GameControllerRumble(controller, 0, rumble_strength, duration);
     }
+}
+
+static std::atomic_bool right_analog_suppressed = false;
+
+static bool button_down_one(SDL_GameController* controller, int32_t input_id) {
+    if (controller == nullptr || input_id < 0 || input_id >= SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_MAX) {
+        return false;
+    }
+    return SDL_GameControllerGetButton(controller, static_cast<SDL_GameControllerButton>(input_id)) != 0;
+}
+
+static float axis_one(SDL_GameController* controller, int32_t input_id, bool allow_suppression) {
+    if (controller == nullptr || abs(input_id) - 1 >= SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX) {
+        return 0.0f;
+    }
+    SDL_GameControllerAxis axis = static_cast<SDL_GameControllerAxis>(abs(input_id) - 1);
+    float cur_val = SDL_GameControllerGetAxis(controller, axis) * (1 / 32768.0f);
+    if (input_id < 0) {
+        cur_val = -cur_val;
+    }
+    if (allow_suppression && right_analog_suppressed.load() &&
+        (axis == SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTX || axis == SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY)) {
+        cur_val = 0.0f;
+    }
+    return std::clamp(cur_val, 0.0f, 1.0f);
 }
 
 bool controller_button_state(int32_t input_id) {
@@ -579,8 +948,6 @@ bool controller_button_state(int32_t input_id) {
     }
     return false;
 }
-
-static std::atomic_bool right_analog_suppressed = false;
 
 float controller_axis_state(int32_t input_id, bool allow_suppression) {
     if (abs(input_id) - 1 < SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX) {
@@ -671,6 +1038,38 @@ bool recomp::get_input_digital(const std::span<const recomp::InputField> fields)
     return ret;
 }
 
+float recomp::get_input_analog(const recomp::InputField& field, int port) {
+    if (field.input_type != static_cast<uint32_t>(InputType::ControllerDigital) &&
+        field.input_type != static_cast<uint32_t>(InputType::ControllerAnalog)) {
+        return get_input_analog(field);
+    }
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    SDL_GameController* controller = nullptr;
+    if (port >= 0 && port < num_controller_ports) {
+        controller = InputState.port_controllers[port];
+    }
+    if (field.input_type == static_cast<uint32_t>(InputType::ControllerDigital)) {
+        return button_down_one(controller, field.input_id) ? 1.0f : 0.0f;
+    }
+    return axis_one(controller, field.input_id, true);
+}
+
+bool recomp::get_input_digital(const recomp::InputField& field, int port) {
+    if (field.input_type != static_cast<uint32_t>(InputType::ControllerDigital) &&
+        field.input_type != static_cast<uint32_t>(InputType::ControllerAnalog)) {
+        return get_input_digital(field);
+    }
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    SDL_GameController* controller = nullptr;
+    if (port >= 0 && port < num_controller_ports) {
+        controller = InputState.port_controllers[port];
+    }
+    if (field.input_type == static_cast<uint32_t>(InputType::ControllerDigital)) {
+        return button_down_one(controller, field.input_id);
+    }
+    return axis_one(controller, field.input_id, true) >= axis_threshold;
+}
+
 void recomp::get_gyro_deltas(float* x, float* y) {
     std::array<float, 2> cur_rotation_delta = InputState.rotation_delta;
     float sensitivity = (float)recomp::get_gyro_sensitivity() / 100.0f;
@@ -721,12 +1120,14 @@ void recomp::apply_joystick_deadzone(float x_in, float y_in, float* x_out, float
 }
 
 void recomp::get_right_analog(float* x, float* y) {
+    std::lock_guard lock{ InputState.cur_controllers_mutex };
+    SDL_GameController* controller = InputState.port_controllers[0];
     float x_val =
-        controller_axis_state((SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTX + 1), false) -
-        controller_axis_state(-(SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTX + 1), false);
+        axis_one(controller, SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTX + 1, false) -
+        axis_one(controller, -(SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTX + 1), false);
     float y_val =
-        controller_axis_state((SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY + 1), false) -
-        controller_axis_state(-(SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY + 1), false);
+        axis_one(controller, SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY + 1, false) -
+        axis_one(controller, -(SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY + 1), false);
     recomp::apply_joystick_deadzone(x_val, y_val, x, y);
 }
 

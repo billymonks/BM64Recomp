@@ -1,7 +1,13 @@
 #include "zelda_support.h"
+#include <string>
 #include <SDL.h>
 #include "nfd.h"
 #include "RmlUi/Core.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#endif
 
 namespace zelda64 {
     // MARK: - Internal Helpers
@@ -45,13 +51,57 @@ namespace zelda64 {
 
     // MARK: - Public API
 
+    namespace {
+        // True when `base/assets/recomp.rcss` exists. An empty base means the working directory.
+        bool directory_has_assets(const std::filesystem::path& base) {
+            std::error_code ec;
+            return std::filesystem::is_regular_file(base / "assets" / "recomp.rcss", ec);
+        }
+
+        std::filesystem::path executable_directory() {
+#ifdef _WIN32
+            std::wstring buffer(32768, L'\0');
+            DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (length == 0 || length >= buffer.size()) {
+                return {};
+            }
+            buffer.resize(length);
+            return std::filesystem::path{buffer}.parent_path();
+#else
+            return {};
+#endif
+        }
+    }
+
     std::filesystem::path get_program_path() {
 #if defined(__APPLE__)
         return get_bundle_resource_directory();
 #elif defined(__linux__) && defined(RECOMP_FLATPAK)
         return "/app/bin";
 #else
-        return "";
+        // Asset paths are get_program_path()/assets/... . An empty path keeps them relative to
+        // the working directory, which is the documented "run the exe from the repo root" launch.
+        // Double-clicking build/BM64Recompiled.exe uses the build directory instead, so also
+        // accept assets beside the executable or in its parent (the repo root).
+        static const std::filesystem::path resolved = [] {
+            if (directory_has_assets({})) {
+                return std::filesystem::path{};
+            }
+
+            const std::filesystem::path exe_dir = executable_directory();
+            if (!exe_dir.empty()) {
+                if (directory_has_assets(exe_dir)) {
+                    return exe_dir;
+                }
+                const std::filesystem::path parent = exe_dir.parent_path();
+                if (directory_has_assets(parent)) {
+                    return parent;
+                }
+            }
+
+            return std::filesystem::path{};
+        }();
+        return resolved;
 #endif
     }
 

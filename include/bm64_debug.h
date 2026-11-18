@@ -21,12 +21,16 @@
 //   BM64_DEBUG_OVERLAY=1      show the debug overlay (normally toggled with F6) from the moment the game starts
 //   BM64_EXIT_ON_REPLAY_END=1 quit when the replay runs out of input
 //   BM64_EXIT_TICK=<n>        quit at tick n
+//   BM64_DISABLE_CHEATS=1     turn cheats off for this run (same switch netplay uses)
 namespace bm64::debug {
     // Shows or hides the debug overlay (F6). Safe to call from any thread once the game has started.
     void toggle_overlay();
     bool autostart_requested();
     // Non-empty if the debug environment variables conflict and the game shouldn't start.
     std::string environment_error();
+    // Netplay turns cheats off for the session. Offline play leaves this false.
+    // Recording and replay suppress cheats on their own. BM64_DISABLE_CHEATS=1 sets this at boot.
+    void set_cheats_disabled(bool disabled);
 
     // A process coroutine that is suspended (or created but not started): its MIPS stack top and saved sp (0 if never run).
     struct ProcessStack {

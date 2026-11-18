@@ -785,6 +785,36 @@ scrollbarhorizontal sliderbar {
   margin-left: 8dp;
 }
 
+.config__ports {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  width: 100%;
+  padding: 10dp 20dp;
+  background-color: rgba(0, 0, 0, 0.25);
+  border-bottom-width: 1.1dp;
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+.config__ports > .button {
+  margin-right: 8dp;
+  flex: 0 0 auto;
+}
+.config__port-device {
+  flex: 1 1 280dp;
+  max-width: 420dp;
+  margin-right: 12dp;
+  padding: 0;
+}
+.config__port-label {
+  width: auto;
+  padding-right: 8dp;
+  color: #CCCCCC;
+}
+.config__port-note {
+  color: #CCCCCC;
+  flex: 1 1 auto;
+}
+
 .config__row {
   display: flex;
   flex-direction: row;

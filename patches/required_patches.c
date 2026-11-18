@@ -811,8 +811,7 @@ enum GenericOffOnOption {
 };
 
 extern u32 D_80027060[];
-
-static OSContPad tempPad;
+extern OSContPad D_802AC410[];
 
 typedef struct LevelClass
 {
@@ -892,7 +891,10 @@ extern u32 D_802AC624; // lives
 extern u32 D_802AC628; // credits
 
 RECOMP_EXPORT void Recomp_ProcessCheats() {
-    osContGetReadData(&tempPad);
+    // Port 0 was just written by func_8023A104, after bm64_input_filter. Reading it here
+    // keeps cheats on the same pads as the simulation. osContGetReadData would ignore that
+    // filter and, called on a single OSContPad, would also write past tempPad.
+    u16 port0_buttons = D_802AC410[0].button;
 
     /* Moonjump (Hold L to Moonjump) */
     switch (recomp_get_moonjump()) {
@@ -901,7 +903,7 @@ RECOMP_EXPORT void Recomp_ProcessCheats() {
             break;
         case (enum GenericOffOnOption)ON:
             // is the player holding L?
-            if (tempPad.button & 0x2000) {
+            if (port0_buttons & 0x2000) {
                 if (g_Players[0].PlayerLevelClass) {
                     g_Players[0].PlayerLevelClass->yVel = -32.0f;
                 }
@@ -1037,10 +1039,10 @@ RECOMP_PATCH void func_80225840(void *arg0) {
             texture_scroll_pending = 0;
             func_8022997C();
         }
+        func_8023A104();           // receive message from the cont mesg queue and run osContGetReadData
         if (bm64_cheats_allowed()) {
             Recomp_ProcessCheats();
         }
-        func_8023A104();           // receive message from the cont mesg queue and run osContGetReadData
         mainGfx = Gfx_InitGfx();   // init gfx
         ThreadProc_RunQueuedThreads();           // get thread pri/start some kind of thread.
         func_802381F8();           // yield to that thread.

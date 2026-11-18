@@ -513,6 +513,10 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
     if (const char* tick = env("BM64_EXIT_TICK")) {
         state.exit_tick = std::strtoll(tick, nullptr, 10);
     }
+    if (env("BM64_DISABLE_CHEATS")) {
+        bm64::debug::set_cheats_disabled(true);
+        printf("[bm64 debug] Cheats disabled (BM64_DISABLE_CHEATS)\n");
+    }
     if (const char* seed = env("BM64_SEED")) {
         state.seed_forced = parse_hex(seed, state.forced_seed);
         if (!state.seed_forced) {
@@ -550,9 +554,18 @@ extern "C" void bm64_session_seed(uint8_t* rdram, recomp_context* ctx) {
     _return(ctx, seed);
 }
 
+namespace {
+    std::atomic_bool cheats_disabled{ false };
+}
+
+void bm64::debug::set_cheats_disabled(bool disabled) {
+    cheats_disabled.store(disabled);
+}
+
 extern "C" void bm64_cheats_allowed(uint8_t* rdram, recomp_context* ctx) {
-    // Cheats read live input and edit state, so they would break recordings.
-    _return(ctx, static_cast<int32_t>(state.input_mode == InputMode::Live));
+    // Cheats edit simulation state from player-1 input. Recordings, replays and netplay leave them off.
+    bool allowed = state.input_mode == InputMode::Live && !cheats_disabled.load();
+    _return(ctx, static_cast<int32_t>(allowed));
 }
 
 extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {

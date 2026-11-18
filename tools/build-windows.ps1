@@ -117,6 +117,6 @@ try {
     }
     Step "Building BM64Recompiled"
     Invoke-Checked cmake @("--build", $BuildDir, "--target", "BM64Recompiled")
-    Step "Done: $(Join-Path $Repo $BuildDir)\BM64Recompiled.exe (run it from the repo root)"
+    Step "Done: $(Join-Path $Repo $BuildDir)\BM64Recompiled.exe"
 }
 finally { Pop-Location }

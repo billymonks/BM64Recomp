@@ -74,6 +74,9 @@ namespace recomp {
     float get_input_analog(const std::span<const recomp::InputField> fields);
     bool get_input_digital(const InputField& field);
     bool get_input_digital(const std::span<const recomp::InputField> fields);
+    // Controller fields are read from the controller assigned to `port`. Keyboard fields ignore `port`.
+    float get_input_analog(const InputField& field, int port);
+    bool get_input_digital(const InputField& field, int port);
     void get_gyro_deltas(float* x, float* y);
     void get_mouse_deltas(float* x, float* y);
     void get_right_analog(float* x, float* y);
@@ -152,13 +155,47 @@ namespace recomp {
     extern const DefaultN64Mappings default_n64_controller_mappings;
 
     constexpr size_t bindings_per_input = 2;
+    constexpr int num_controller_ports = 4;
+
+    // Which controller, if any, drives an N64 port. Keyboard always drives port 0 as well.
+    enum class PortDeviceMode {
+        Auto,
+        None,
+        Device
+    };
+
+    struct PortDeviceConfig {
+        PortDeviceMode mode = PortDeviceMode::Auto;
+        std::string device_id;
+    };
+
+    struct PortDeviceOption {
+        std::string id;
+        std::string label;
+    };
 
     size_t get_num_inputs();
     const std::string& get_input_name(GameInput input);
     const std::string& get_input_enum_name(GameInput input);
     GameInput get_input_from_enum_name(const std::string_view name);
-    InputField& get_input_binding(GameInput input, size_t binding_index, InputDevice device);
-    void set_input_binding(GameInput input, size_t binding_index, InputDevice device, InputField value);
+    InputField& get_input_binding(GameInput input, size_t binding_index, InputDevice device, int port = 0);
+    void set_input_binding(GameInput input, size_t binding_index, InputDevice device, InputField value, int port = 0);
+    std::string joined_controller_binding_text(GameInput input);
+
+    PortDeviceConfig get_port_device(int port);
+    void set_port_device(int port, const PortDeviceConfig& config);
+    // Dropdown options for one port: Auto, None, then each connected controller.
+    std::vector<PortDeviceOption> port_device_options(int port);
+    int port_device_option_index(int port);
+    void set_port_device_option(int port, int option_index);
+    std::string port_assignment_status(int port);
+    // Port 0 is always connected because of the keyboard. Other ports are connected when a controller is assigned.
+    bool port_is_connected(int port);
+    // `joystick_instance` is an SDL_JoystickID.
+    bool joystick_is_on_port(int32_t joystick_instance, int port);
+    bool joystick_button_matches(int32_t joystick_instance, int32_t button, GameInput input);
+    void set_input_editing_port(int port);
+    void set_controllers_changed_callback(void (*callback)());
 
     bool get_n64_input(int controller_num, uint16_t* buttons_out, float* x_out, float* y_out);
     void set_rumble(int controller_num, bool);

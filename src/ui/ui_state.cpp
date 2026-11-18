@@ -466,30 +466,14 @@ bool recompui::try_deque_event(SDL_Event& out) {
 }
 
 int cont_button_to_key(SDL_ControllerButtonEvent& button) {
-    // Configurable accept button in menu
-    auto menuAcceptBinding0 = recomp::get_input_binding(recomp::GameInput::ACCEPT_MENU, 0, recomp::InputDevice::Controller);
-    auto menuAcceptBinding1 = recomp::get_input_binding(recomp::GameInput::ACCEPT_MENU, 1, recomp::InputDevice::Controller);
-    // note - magic number: 0 is InputType::None
-    if ((menuAcceptBinding0.input_type != 0 && button.button == menuAcceptBinding0.input_id) ||
-        (menuAcceptBinding1.input_type != 0 && button.button == menuAcceptBinding1.input_id)) {
+    // Each controller uses the menu bindings of the port it is assigned to.
+    if (recomp::joystick_button_matches(button.which, button.button, recomp::GameInput::ACCEPT_MENU)) {
         return SDLK_RETURN;
     }
-
-    // Configurable apply button in menu
-    auto menuApplyBinding0 = recomp::get_input_binding(recomp::GameInput::APPLY_MENU, 0, recomp::InputDevice::Controller);
-    auto menuApplyBinding1 = recomp::get_input_binding(recomp::GameInput::APPLY_MENU, 1, recomp::InputDevice::Controller);
-    // note - magic number: 0 is InputType::None
-    if ((menuApplyBinding0.input_type != 0 && button.button == menuApplyBinding0.input_id) ||
-        (menuApplyBinding1.input_type != 0 && button.button == menuApplyBinding1.input_id)) {
+    if (recomp::joystick_button_matches(button.which, button.button, recomp::GameInput::APPLY_MENU)) {
         return SDLK_f;
-    } 
-
-    // Allows closing the menu
-    auto menuToggleBinding0 = recomp::get_input_binding(recomp::GameInput::TOGGLE_MENU, 0, recomp::InputDevice::Controller);
-    auto menuToggleBinding1 = recomp::get_input_binding(recomp::GameInput::TOGGLE_MENU, 1, recomp::InputDevice::Controller);
-    // note - magic number: 0 is InputType::None
-    if ((menuToggleBinding0.input_type != 0 && button.button == menuToggleBinding0.input_id) ||
-        (menuToggleBinding1.input_type != 0 && button.button == menuToggleBinding1.input_id)) {
+    }
+    if (recomp::joystick_button_matches(button.which, button.button, recomp::GameInput::TOGGLE_MENU)) {
         return SDLK_ESCAPE;
     }
 
@@ -715,11 +699,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
                 }
                 break;
             case SDL_EventType::SDL_CONTROLLERBUTTONDOWN:
-                auto menuToggleBinding0 = recomp::get_input_binding(recomp::GameInput::TOGGLE_MENU, 0, recomp::InputDevice::Controller);
-                auto menuToggleBinding1 = recomp::get_input_binding(recomp::GameInput::TOGGLE_MENU, 1, recomp::InputDevice::Controller);
-                // note - magic number: 0 is InputType::None
-                if ((menuToggleBinding0.input_type != 0 && cur_event.cbutton.button == menuToggleBinding0.input_id) ||
-                    (menuToggleBinding1.input_type != 0 && cur_event.cbutton.button == menuToggleBinding1.input_id)) {
+                if (recomp::joystick_button_matches(cur_event.cbutton.which, cur_event.cbutton.button, recomp::GameInput::TOGGLE_MENU)) {
                     open_config = true;
                 }
                 break;

@@ -3,14 +3,28 @@
     </head>
     <body>
         <form class="config__form" data-attr-cur-input="cur_input_row" data-attr-cur-binding-slot="active_binding_slot">
+            <div class="config__ports">
+                <button class="button" id="port_btn_0" data-class-button--primary="cur_port == 0" data-event-click="set_control_port(0)" style="nav-up: #tab_controls; nav-down: #cont_kb_toggle">Port 1</button>
+                <button class="button" id="port_btn_1" data-class-button--primary="cur_port == 1" data-event-click="set_control_port(1)" style="nav-up: #tab_controls">Port 2</button>
+                <button class="button" id="port_btn_2" data-class-button--primary="cur_port == 2" data-event-click="set_control_port(2)" style="nav-up: #tab_controls">Port 3</button>
+                <button class="button" id="port_btn_3" data-class-button--primary="cur_port == 3" data-event-click="set_control_port(3)" style="nav-up: #tab_controls">Port 4</button>
+                <div class="config__port-device config-debug__select-wrapper">
+                    <label class="config__port-label">Controller</label>
+                    <select id="port_device_select" data-value="port_device_index" onchange="port_device_changed">
+                        <option data-for="device, i : port_device_options" data-attr-value="i">{{device}}</option>
+                    </select>
+                </div>
+                <div class="config__port-note">{{port_input_status}}</div>
+            </div>
             <div class="config__header">
                 <div class="config__header-left">
                     <button
                         class="toggle"
                         id="cont_kb_toggle"
+                        data-if="cur_port == 0"
                         data-class-toggle--checked="input_device_is_keyboard"
                         onclick="toggle_input_device"
-                        style="nav-down: #input_row_button_0_0; nav-up: #tab_controls"
+                        style="nav-down: #input_row_button_0_0; nav-up: #port_btn_0"
                     >
                         <div class="toggle__border" />
                         <div class="toggle__floater" />
@@ -55,7 +69,7 @@
                                             data-event-click="set_input_binding(i,j)"
                                             class="prompt-font control-option__binding"
                                             data-attr-bind-slot="j"
-                                            data-attr-style="i == 0 ? 'nav-up:#cont_kb_toggle' : 'nav-up:auto'"
+                                            data-attr-style="i == 0 ? (cur_port == 0 ? 'nav-up:#cont_kb_toggle' : 'nav-up:#port_btn_0') : 'nav-up:auto'"
                                         >
                                             <div class="control-option__binding-recording">
                                                 <div class="control-option__binding-circle" />
@@ -72,7 +86,7 @@
                                         data-event-focus="set_input_row_focus(i)"
                                         data-event-click="clear_input_bindings(i)"
                                         class="icon-button icon-button--error"
-                                        data-attr-style="i == 0 ? 'nav-up:#cont_kb_toggle' : 'nav-up:auto'"
+                                        data-attr-style="i == 0 ? (cur_port == 0 ? 'nav-up:#cont_kb_toggle' : 'nav-up:#port_btn_0') : 'nav-up:auto'"
                                     >
                                         <svg src="icons/Trash.svg" />
                                     </button>
@@ -82,7 +96,7 @@
                                         data-event-focus="set_input_row_focus(i)"
                                         data-event-click="reset_single_input_binding_to_default(i)"
                                         class="icon-button icon-button--error"
-                                        data-attr-style="i == 0 ? 'nav-up:#cont_kb_toggle' : 'nav-up:auto'"
+                                        data-attr-style="i == 0 ? (cur_port == 0 ? 'nav-up:#cont_kb_toggle' : 'nav-up:#port_btn_0') : 'nav-up:auto'"
                                     >
                                         <svg src="icons/Reset.svg" />
                                     </button>
