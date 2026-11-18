@@ -41,21 +41,32 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
   - Work: add a short usage header to each `tools/re` script; make overlay arguments consistent; add a `find.py` for searching function and symbol names.
   - Done when: a new agent can disassemble any function, including overlay functions, and run cross-references with one command each.
   - Note: `bmdis.py func_ovl4_10_80043010` auto-loads overlays and shows stub targets; `xref.py --all-ovl <addr>` scans all overlays through stubs; `find.py <regex|0xaddr>`.
-- [ ] **0.3 State hash**
+- [x] **0.3 State hash**
   - Depends on: 0.1.
   - Work: a host-side function that hashes (xxHash3) a configurable list of RDRAM ranges, defaulting to the "yes" rows of the RDRAM map in `game-internals.md`. Call it once per tick at the top of the main loop. Log `tick,hash` to a file when a debug option is on.
   - Done when: hashes are logged every tick with negligible cost.
-  - Note: implemented and built, awaiting an in-game check. `bm64_debug_tick` in `src/game/bm64_debug.cpp`, enabled with `BM64_HASH_LOG=<path>`; per-range hashes are logged so a mismatch can be localised. See "Debug tooling" in `game-internals.md`.
-- [ ] **0.4 Debug overlay**
+  - Note: `bm64_debug_tick` in `src/game/bm64_debug.cpp`, enabled with `BM64_HASH_LOG=<path>`; one column per range. Verified in game on 2026-11-17: a 9,591-tick replay runs at full speed with logging and dumps on.
+  - Note: the first ranges (whole `bss` and main BSS) differed on every tick between runs because they contained `OSThread`s (ultramodern stores a host pointer in them), message queues, the scheduler and audio-thread state. The default list now has seven ranges with those objects left out, and it skips dead process stack memory. The exact list is in "State hash ranges" in `game-internals.md`.
+  - Note: diagnostics are `BM64_DUMP_TICKS` (RDRAM dumps), `tools/re/dumpdiff.py` (diff dumps into labelled ranges), `tools/re/osobjs.py` (find OS objects), and `tools/run-replay.ps1` (unattended replay with `BM64_AUTOSTART` and `BM64_EXIT_ON_REPLAY_END`).
+- [x] **0.4 Debug overlay**
   - Depends on: 0.1.
   - Work: a toggleable RmlUi (or text) panel showing the tick number, state hash, main player index, each `g_Players` slot (controlType, hearts, bombs, fire, position), camera eye and target, RNG index, the loaded overlay ID (`gOverlayID`), and the process count.
   - Done when: the panel updates live in story and Battle.
-  - Note: implemented and built, awaiting an in-game check. F3 toggles it in-game (`src/ui/ui_debug_overlay.cpp`); it never captures input.
-- [ ] **0.5 Input record and replay**
+  - Note: `src/ui/ui_debug_overlay.cpp`, toggled with **F6** (or `BM64_DEBUG_OVERLAY=1`); it never captures input. It was first bound to F3, which never reached the game: RT64's developer mode (on by default in this fork) swallows F1–F4, and F3 toggles its "view RDRAM" 4:3 framebuffer view. The toggle now shows or hides the panel immediately, so it also works over the in-game menus. It works from game start onward, but not on the launcher.
+  - Note (2026-11-17): an unattended replay of `new.bm64rec` with `-Overlay` logged the overlay drawn on every UI frame (about 21,000 frames), with live text through the menus and stage 7.1, and nothing visible above it. The hashes still matched the recording.
+  - Done (2026-11-17): the user confirmed in game that F6 shows the live panel (top-left) during gameplay.
+- [x] **0.5 Input record and replay**
   - Depends on: 0.3.
   - Work: record the 4-port pad data that `func_8023A104` receives each tick, plus the RNG seed, to a file; replay it by injecting the pads instead of reading real controllers. Force the seed on replay; see 2.1 if a patch hook is needed.
   - Done when: replaying a recorded story stage reproduces identical per-tick hashes on the same machine.
-  - Note: implemented and built, awaiting the same-machine replay test. `func_8023A104` is now a patch (`patches/input_hooks.c`) that calls `bm64_input_filter` before the history update. Recordings include the save file, and replays run against a copy in `saves/replay/`. `BM64_SEED` already forces the seed, which covers part of 2.1.
+  - Note: `func_8023A104` is now a patch (`patches/input_hooks.c`) that calls `bm64_input_filter` before the history update. Recordings include the save file, and replays run against a copy in `saves/replay/`. `BM64_SEED` already forces the seed, which covers part of 2.1.
+  - Note (2026-11-17): **replay vs replay is deterministic**. Two unattended replays of `test.bm64rec` (boot into stage 4.1, 9,591 ticks) hash identically on every tick in every range. Getting there needed two fixes beyond the range changes in 0.3, both because the render thread wrote game memory:
+    - the texture scroll `func_8022997C`, which rewrites vertex UVs in heap model data;
+    - the frames-since-render counter `D_802A5800`, which drives blinking objects.
+    Both depended on when the render thread picked up or finished a frame, and on dropped frames. They now run on the game thread once per submitted frame (`Gfx_EndRender` and the main loop in `patches/required_patches.c`).
+  - Note: the user's recording log `rec.csv` can't match a replay, because it was made before these fixes. Its `bss`/`main` columns include thread host pointers, and its heap took an extra or missing scroll step at tick 1702, when the stage 4.1 scroll started (an RT64 hitch is likely). Against it, the `ovl` column matches on all 9,590 ticks. The heap matches through tick 1701. It differs in ticks 1702–6488 (the recording's own offset, which heals at the next map load), and in 8019, 8422–8425 and 8837 onward. In those last windows the old build's own replays differ from the fixed build in the same way: the old build lost a step at a dropped frame.
+  - Done (2026-11-17): the user recorded `new.bm64rec` with the fixed build: boot, menus, then stage 7.1 for about 7,250 ticks, 8,838 input frames. An unattended replay (`tools/run-replay.ps1`) matches the recording-side log `new_rec.csv` on all 8,837 ticks in all seven ranges.
+  - Note: the game now refuses to start if both `BM64_RECORD` and `BM64_REPLAY` are set (a leftover `BM64_REPLAY` had silently turned a recording session into a replay).
 
 ## Phase 1 – Local multiplayer
 
@@ -103,6 +114,7 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
   - Depends on: 0.2.
   - Work: find every gameplay read of sound state (sound handles, "is playing" queries, music position) by cross-referencing the sound API and audio structures. Document them in `game-internals.md`.
   - Done when: there's a list of functions where audio could affect simulation, with a mitigation for each.
+  - Note: found so far (see section 10 of `game-internals.md`): the sound slot table `D_800BD770`/`D_800BD778` frees slots when the audio side reports a sound stopped, so it can change a tick apart between runs. It is excluded from the state hash for now. Gameplay doesn't read it back, but sound handles come from `func_8026724C`, which picks free entries based on audio state; check whether handle values can differ.
 
 ## Phase 3 – In-process savestates (main technical risk)
 
@@ -110,6 +122,7 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
   - Depends on: 0.3, 2.6.
   - Work: resolve the "audit" rows in the RDRAM map. Produce an explicit include/exclude list, excluding OS threads, message queues, the scheduler, gfx buffers and IDs, and audio structures.
   - Done when: the list is in `game-internals.md` and used by the state hash.
+  - Note: a first verified list is in "State hash ranges" in `game-internals.md` and is the hash default. Still to audit: `0x800BEA60`–`0x80100000`, game-state patch globals (for example `texture_scroll_pending`), and freed malloc blocks.
 - [ ] **3.2 Fixed coroutine stack pool**
   - Depends on: 0.1.
   - Work: in `process_coroutines.cpp`, preallocate one native stack per slot (0x50) and reuse slot *i*'s stack forever. Use a custom minicoro allocator so nothing is freed and nothing moves.

@@ -27,7 +27,9 @@ Companion document: [online-play-plan.md](online-play-plan.md).
 | `stubs.py` | Resolves overlay secure-call stubs to their main-code targets |
 | `xref.py` | Finds references to an address range: `python xref.py 0x802AC894 0x802AC898`. `--all-ovl` also scans every overlay, counting stub calls as calls to the target; `.ovl_x_subovl_y` arguments scan only those |
 | `make_decomp_rom.py` | Writes `bm64.decomp.us.z64` (the layout N64Recomp expects) from the retail ROM |
-| `compare_hashes.py` | Compares two `BM64_HASH_LOG` files and reports the first differing tick per range |
+| `compare_hashes.py` | Compares two `BM64_HASH_LOG` files: per range, the first differing tick, how many ticks differ, and the last one |
+| `dumpdiff.py` | Diffs two `BM64_DUMP_TICKS` RDRAM dumps into address ranges with region labels and symbols; flags gfx-buffer-parity pointers and host pointers; skips dead process stacks. `python dumpdiff.py a/dumps/tick_1702.bin b/dumps/tick_1702.bin [--ranges default\|legacy\|all\|<spec>]` |
+| `osobjs.py` | Lists OS, scheduler and audio objects (threads, message queues, `OSSched`, audio heap) by the constant arguments passed to libultra calls, including calls through secure-call stubs |
 | `argclass.py` | Classifies the `$a0` argument at every call site of given functions |
 | `ovlsurvey.py`, `strs.py`, `slots.py`, `players.py`, `p0api.py`, `rammap.py`, `survey.py` | One-off surveys used to produce this document |
 
@@ -67,6 +69,7 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
 ## 3. Threads, main loop and timing
 
 - **Main loop** (verified): `func_80225840`, already re-implemented in `patches/required_patches.c`. One iteration is one game tick:
+  0. `bm64_debug_tick()` (state hash, dumps), then the texture scroll `func_8022997C` if the previous tick submitted a frame (recomp: moved from the render thread, see section 9)
   1. `Recomp_ProcessCheats()` (recomp addition; calls `osContGetReadData` directly)
   2. `func_8023A104()`: wait for controller data and update input history (section 5)
   3. `Gfx_InitGfx()`
@@ -76,11 +79,15 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
   7. `func_802290CC()`: draw pass, which also advances animations (section 9)
   8. `func_8025E1D4()` (soft-reset effect), then `func_8026C208()` (audio housekeeping)
   9. `func_8023A208()`: `osContStartReadData` for the next tick
-  10. `Gfx_EndRender()`: finish the display list, hand it to the render thread, then `func_80237F44()` blocks until the next vertical blank
+  10. `Gfx_EndRender()`: finish the display list, hand it to the render thread (and reset `D_802A5800`), then `func_80237F44()` blocks until the next vertical blank
 - **Tick rate**: 60 Hz (verified). The loop waits for exactly one retrace through `ThreadProc_RunQueues`, and the recomp sets `gEXSetRefreshRate(60)`.
 - **Fixed timestep** (verified): `HuPrcCall` decrements process sleep timers by exactly 1 per tick, in both the original and the patched version. `gThreadFrameCount` and `ThreadProc_GetCurrentFrameCount` (`0x80237F34`) have no callers or pointer references.
 - **Clocks** (verified): the only clock read in main code is `g_initRandom(osGetTime())` at boot. No overlay calls `osGetTime`, `osGetCount`, `osCreateThread`, `ThreadProc_Add`, EEPROM, Controller Pak or controller functions.
 - **OS threads**: game thread (id 3, runs the main loop and all processes), render thread `Gfx_Render` (the only thread created through `ThreadProc_Add`, from `Gfx_CreateRenderThread`), the ThreadProc manager `ThreadProc_RunQueues` (retrace fan-out), plus libultra VI, PI, scheduler and audio threads. Thread names come from `zelda64::get_game_thread_name` in `src/main/main.cpp`.
+- **Thread and queue objects in RDRAM** (verified with `osobjs.py` and dumps):
+  - `OSThread`s: `gGameThread` `0x80020668` (boot BSS), pre-NMI thread `D_800BE868` (`func_8025E100`, created by `func_8025E16C`), the render thread inside `gThreadProcs` (`0x802A5A60`, 8 entries of `0x5D8`), the scheduler's thread inside `OSSched D_802A89B0`, `gThreadProcManagerThread` `0x802AAC48`, and the audio thread `D_802AD6B8` (`func_8026B584`).
+  - ultramodern's `OSThread` keeps a **host pointer** (`context`) at `+0x20`, so every thread object differs between runs from tick 0.
+  - Message queues: render `D_802A5330` (1 slot, non-blocking send from `Gfx_EndRender`), retrace `D_802A5348`, RSP done `D_802A53A0`, ThreadProc `D_802A8938`/`D_802A8958`, controller `D_802AC3E0`, audio `D_802AD1F8`, `D_802AD868`, `D_802AD8A0`, `D_802AFBA0`, pre-NMI `D_800BE848`.
 
 ### Hudson processes (HuPrc) and recomp coroutines
 
@@ -210,12 +217,21 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
 - **Viewport contexts**: `gFrameBuffers[4]` of `FBInfo` (0x6C bytes each: viewport, enabled, sub-DL id, matrix, scissor). `D_802AC5C0` points at the main context.
 - **Draw pass** `func_802290CC`: for each enabled context it walks model hierarchies through `func_802289C0`, calling per-node callbacks with `jalr` and `func_8022D58C` (matrix stack using `D_802A5418`). **It advances animations** (the recomp authors note that stubbing it freezes animation), so it mutates simulation state. Whether any callback culls by camera hasn't been checked yet.
 - **Render thread** `Gfx_Render` (patched) receives buffers through `D_802A5330` and builds scheduler tasks. The patches already contain `startGfxWait`/`waitForGfxFinish` (wait for display-list completion).
+- **Dropped frames** (verified): `Gfx_EndRender` sends the finished frame to the 1-slot queue `D_802A5330` without blocking, so a frame is dropped whenever the render thread is still busy (for example during RT64 shader compiles or texture uploads after a map load). The game keeps running at 60 Hz regardless.
+- **Double-buffer parity** (verified): the render thread flips `gFrontBufferID` (`0x8029F5E0`) for each frame it picks up, and the game builds into `gGfxWork[gFrontBufferID]`. After a dropped frame, `gBackBufferID`, `gGfxWorkPtr`, `gMasterDisplayList`, `gBufferEnds` and the matrix cursor `D_802A5550` point into the other buffer, so they differ between runs. No other game memory keeps gfx-work pointers.
+- **Render thread writes into game memory** (verified; both now moved to the game thread by `patches/required_patches.c`):
+  - `func_8022997C`, texture scroll: up to 6 entries in `D_80098C68` (stride `0x18`: object, vertex array, count, speed u/v, limit u/v, accumulator u/v). Registered by `func_80229C90` (called by stage setup in many map overlays and by `func_802553D4`) and freed by `func_80229BF4`. It adds the speed to the `s`/`t` texcoords of every vertex in the array, and the vertex arrays live in model data on the malloc heap. It used to run on the render thread after each drawn frame, so a dropped frame or a different render phase left a permanent UV offset in the heap until the map reloaded. It now runs once per submitted frame at the start of the next tick.
+  - `D_802A5800`, frames since the render thread last picked up a frame: zeroed by `Gfx_Render`, incremented every tick by the boot process `func_802334CC`, which passes it to `func_80232FF8` for two object lists (`D_802A55F4`, `D_802A56F4`). For objects with flag bit 18 it toggles a blink phase (flag bit 30 and the model's visibility bit) only when the counter is 0. It is now zeroed by `Gfx_EndRender` when a frame is submitted.
+  - The rest of `func_80232FF8` (mode `D_802A5804`) hides objects based on projected camera depth, which is camera-dependent but deterministic.
 
 ---
 
 ## 10. Sound and saves
 
 - **Sound API**: `g_PlayGlobalSound` (`0x8026C660`), `g_PlayLocalSound` (`0x8026C51C`), `g_StopSound` (`0x8026C0A8`). They return and accept sound handles. Per-tick housekeeping: `func_8026C208`. Volume scaling patches live in `required_patches.c`. Whether gameplay reads sound status (for example waiting for a sound to end) hasn't been audited.
+- **Audio memory** (verified): the audio heap is `0x8019C2E0`–`0x801E56C0` (`alHeapInit` from `func_8026A754`, size `0x493E0`, set up by `func_8026C77C`). Audio globals, queues, the audio thread and its stack are in main BSS `0x802AD120`–`0x802AFC20` (`D_802AD120` alHeap, `D_802AD8D8` audio thread stack and globals). Pointers into the sound table `D_802AD654` (in the audio heap) are `D_802AD64C`–`D_802AD675`.
+- **Sound slot table** `D_800BD770` (8 countdown words) and `D_800BD778` (8 × `0x14`: position xyz, flag, handle) (verified): written by the play functions and the position setters `func_8026C40C`/`func_8026C454`. Each tick `func_8026C208` frees a slot (handle = -1) when `func_80266CD4` reports the sound has stopped. That check reads the state byte `+0x1B` of the sound's `D_802AD654` entry, which follows audio-thread progress, so the table can change a tick earlier or later between runs. Gameplay doesn't read the table back.
+- **Audio pointers on process stacks** (verified): sound calls leave audio-heap pointers in stack slots below the caller's `sp`. Their values depend on audio-heap allocation order, so they differ between runs.
 - **Saves**: EEPROM, main code only. `func_80292DB8` reads, `func_80292E90` writes. `func_80294E54` probes the EEPROM and **reads the save** at boot, before the RNG is seeded (verified). Controller Pak menus exist in 2.6 and 3.6.
 - **Runtime save handling**: the save buffer lives in librecomp (`lib/N64ModernRuntime/librecomp/src/pi.cpp`). `ultramodern::change_save_file(subfolder, name)` switches to `saves/<subfolder>/<name>.bin` and reloads it; replays use this to run against a copy.
 
@@ -229,16 +245,35 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
 | `0x8001BFC0`–`0x80028460` | Boot BSS: OS threads and stacks, `gGameThread`, `gSectionSizes` | no (OS) |
 | `0x80042000` | zerojump secure-call table | no |
 | `0x80043000`–`0x80063000` | Resident sub-overlay code, data and BSS (largest overlay is `0xE320`) | data/BSS yes |
-| `0x80063000`–`0x800BEA60` | Main game BSS, zeroed at boot: process pool `0x80063370`, camera `0x8008E648…`, `g_Players` `0x800AEDF0`, model and anim work around `0x80098C18`/`0x800A0CF8` | yes (audit for OS objects) |
+| `0x80063000`–`0x800BEA60` | Main game BSS, zeroed at boot: process pool `0x80063370` (`0x50` × `0x8A0`, each with an inline `0x800` MIPS stack at `+0x28`), camera `0x8008E648…`, texture scroll table `0x80098C68`, `g_Players` `0x800AEDF0`, model and anim work around `0x80098C18`/`0x800A0CF8`, `gFrameBuffers` `0x800BD5B0`, sound slot table `0x800BD770`, pre-NMI thread `0x800BE848` | yes, minus the sound slot table and the pre-NMI thread |
 | `0x800BEA60`–`0x80100000` | Unknown; referenced by gfx and model code | audit |
 | `0x80100000`–`0x8014B000` | Framebuffers | no |
 | `0x8014C8D0`–`0x8019A8D0` | gfx work (display lists) | no |
-| `0x8019A8D0`–`0x80225800` | RSP stack, data loaded from ROM at `0x8019B0D0`, model/file region around `0x801A0000`, RSP output buffer `0x801E56C0` | audit |
+| `0x8019A8D0`–`0x80225800` | RSP stack, data loaded from ROM at `0x8019B0D0`, audio heap `0x8019C2E0`–`0x801E56C0`, RSP output buffer `0x801E56C0` | no (audio heap); rest audit |
 | `0x80225800`–`0x8029F5E0` | Main code and rodata | no |
-| `0x8029F5E0`–`0x802A5300` | Main data (gfx globals, tables) | partial |
-| `0x802A5300`–`0x802B36D0` | Main BSS: gfx state, ThreadProc tables `0x802A5A60`, process lists, input, RNG, `g_LevelLoader` `0x802AC5D0`, malloc bookkeeping `0x802B3620` | partial |
+| `0x8029F5E0`–`0x802A5300` | Main data (gfx globals, tables) | yes, minus `gFrontBufferID` and the two `OSScTask`s |
+| `0x802A5300`–`0x802B36D0` | Main BSS: gfx state, ThreadProc tables `0x802A5A60`, process lists, input, RNG, `g_LevelLoader` `0x802AC5D0`, audio `0x802AD120`–`0x802AFC20`, malloc bookkeeping `0x802B3620` | partial; see below |
 | `0x802B36D0`–`0x80400000` | malloc heap (models, files, allocated stacks) | yes |
-| `0x80801000`–`0x81000000` | Recomp patch code and data ("extram", `patches/patches.ld`) | patch globals that are game state |
+| `0x80801000`–`0x81000000` | Recomp patch code and data ("extram", `patches/patches.ld`) | patch globals that are game state (for example `texture_scroll_pending` in `required_patches.c`) |
+
+### State hash ranges (verified 2026-11-17)
+
+The default `BM64_HASH_RANGES` list. With it, two replays of the same recording hash identically on every tick. Each gap was found by diffing dumps from two replays (`dumpdiff.py`).
+
+| Name | Included | Excluded inside or next to it, and why |
+|---|---|---|
+| `ovl` | `0x80043000`–`0x80063000` | nothing |
+| `bss` | `0x80063000`–`0x800BD770`, `0x800BD818`–`0x800BE848` | `0x800BD770`–`0x800BD818` sound slot table (follows audio-thread state); `0x800BE848`–`0x800BEA60` pre-NMI thread queue, `OSThread` (host pointer) and stack |
+| `data` | `0x8029F5E4`–`0x8029F608`, `0x8029F6D8`–`0x802A5300` | `0x8029F5E0` `gFrontBufferID` (flipped by the render thread); `0x8029F608`–`0x8029F6D8` `OSScTask` × 2 (render thread, scheduler) |
+| `gfx` | `0x802A5300`–`0x802A5330`, `0x802A5368`–`0x802A5380`, `0x802A53BC`–`0x802A5550`, `0x802A5554`–`0x802A5A60` | `0x802A5330`–`0x802A5368` render and retrace queues; `0x802A5380`–`0x802A53BC` `gBufferEnds`, `gBackBufferID`, `gGfxWorkPtr`, `gMasterDisplayList` (buffer parity), `D_802A5394`/`D_802A5398` (render thread), RSP-done queue `D_802A53A0`; `0x802A5550` matrix cursor into gfx work (buffer parity) |
+| — | — | `0x802A5A60`–`0x802AB200` `gThreadProcs` (render thread `OSThread` + stack), ThreadProc globals, retrace queues, `gThreadFrameCount`, `OSSched` + scheduler stack, ThreadProc manager thread + stack |
+| `prc` | `0x802AB200`–`0x802AC3E0` | nothing (HuPrc lists and globals) |
+| — | — | `0x802AC3E0`–`0x802AC400` controller message queue and buffer |
+| `game` | `0x802AC400`–`0x802AD120`, `0x802AFC20`–`0x802B36D0` | `0x802AD120`–`0x802AFC20` audio globals, queues, audio thread + stack |
+| `heap` | `0x802B36D0`–`0x80400000` | nothing |
+
+- **Dead process stacks** are skipped in every range: memory below each suspended process's MIPS `sp`, and whole inline stacks that no live process uses. The live `sp` comes from the coroutine slot (`bm64::debug::get_process_stacks` in `process_coroutines.cpp`). Under the o32 ABI nothing valid lives below `sp`, but stale slots there hold audio-heap pointers that differ between runs. `BM64_HASH_DEAD_STACKS=1` hashes them anyway.
+- **Not hashed and not yet audited**: `0x800BEA60`–`0x80100000`, `0x8019A8D0`–`0x8019C2E0`, and patch globals in `0x80801000+`. Freed malloc blocks are hashed as-is.
 
 ---
 
@@ -268,15 +303,30 @@ Host side: `src/game/bm64_debug.cpp` (`include/bm64_debug.h`). Overlay UI: `src/
 | `bm64_cheats_allowed()` | Gates `Recomp_ProcessCheats` (off while recording or replaying) |
 | `bm64_input_filter(pads)` | Inside `func_8023A104`, after the controller read |
 
-- **Environment variables** (read once at boot):
-  - `BM64_HASH_LOG=<path>` writes `tick,input_frame,overlay,total,ovl,bss,main,heap` per tick (xxHash3).
-  - `BM64_HASH_RANGES=80063000-800BEA60,...` overrides the hashed ranges.
-  - `BM64_RECORD=<path>` / `BM64_REPLAY=<path>` record or replay input.
+- **Environment variables** (read once at boot; the full list is in `include/bm64_debug.h`):
+  - `BM64_HASH_LOG=<path>` writes `tick,input_frame,overlay,total,<one column per range>` per tick (xxHash3).
+  - `BM64_HASH_RANGES=<spec>` overrides the hashed ranges. The spec is comma-separated `[name:]start-end[+start-end...]`. The Phase 0 ranges, needed to compare with logs made before 2026-11-17, are `ovl:80043000-80063000,bss:80063000-800BEA60,main:8029F5E0-802B36D0,heap:802B36D0-80400000` together with `BM64_HASH_DEAD_STACKS=1`.
+  - `BM64_HASH_DEAD_STACKS=1` also hashes dead process stack memory.
+  - `BM64_DUMP_TICKS=0,1702,...` writes RDRAM `0x80000000`–`0x80800000` in N64 byte order to `BM64_DUMP_DIR` (default `dumps`) as `tick_<n>.bin`, plus `tick_<n>.mask` listing the dead stack ranges.
+  - `BM64_RECORD=<path>` / `BM64_REPLAY=<path>` record or replay input. If both are set, the game shows an error and exits at startup (`bm64::debug::environment_error`, checked in `main`).
   - `BM64_SEED=<hex>` forces the RNG seed.
-- **Default hash ranges**: `ovl` `0x80043000`–`0x80063000`, `bss` `0x80063000`–`0x800BEA60`, `main` `0x8029F5E0`–`0x802B36D0`, `heap` `0x802B36D0`–`0x80400000`. `main` contains OS, gfx and audio objects and may vary with thread timing; refine during 3.1.
+  - `BM64_DEBUG_OVERLAY=1` shows the debug overlay from startup (`tools/run-replay.ps1 -Overlay`).
+  - `BM64_AUTOSTART=1` skips the launcher (`recompui::try_autostart_game`, called from the UI draw hook) if the ROM is valid.
+  - `BM64_EXIT_ON_REPLAY_END=1` quits on the tick after the replay runs out of input; `BM64_EXIT_TICK=<n>` quits at tick n. Both close the hash log first.
+- **Default hash ranges**: `ovl`, `bss`, `data`, `gfx`, `prc`, `game`, `heap`, with OS, render-thread and audio objects and dead stacks left out. See "State hash ranges" in section 11.
+- **Unattended replays**: `tools/run-replay.ps1 -Replay <file> -Out <dir> [-DumpTicks 0,1702] [-Ranges legacy|<spec>] [-TimeoutSec 600]` sets autostart, exit-on-replay-end, hash log and dumps, and kills the game if it is still running after the timeout. It writes `<dir>/hashes.csv`, `stdout.txt` and `dumps/`. A 9,591-tick replay takes about 165 s.
+- **Diagnosing a mismatch**: run two replays with `-DumpTicks` at the first differing tick from `compare_hashes.py`, then `dumpdiff.py`. To localise intermittent mismatches without guessing dump ticks, pass a `-Ranges` spec that splits one range into 4 KB columns.
 - **Recording format** (little-endian): `"BM64INP\0"`, u32 version (1), u32 seed, u32 save_size, the save file bytes, then one 24-byte frame per `func_8023A104` call (4 × `{u16 button; s8 stick_x; s8 stick_y; u8 errno; u8 reserved}`). The boot-time read from `func_8023A22C` is the first frame. When a replay runs out, input goes live again and the overlay shows "REPLAY ENDED".
 - **Replay limits**: only `osContGetReadData` data is replayed. Controller status queries (`osContStartQuery`/`osContGetQuery`) and pak detection are live, so keep the same controllers connected.
-- **Overlay**: F3 in-game. It shows tick, input frame, loaded overlay ("4.10"), input mode, total and per-range hashes, main player, process count, RNG index, seed, camera eye and target, and slots P0–P4 (control type, hearts, bombs, fire, bomb type, position). It refreshes every 4 ticks and never captures input.
+- **Overlay**: toggled with **F6**, or shown from startup with `BM64_DEBUG_OVERLAY=1`. It shows tick, input frame, loaded overlay ("4.10"), input mode, total and per-range hashes, main player, process count, RNG index, seed, camera eye and target, and slots P0–P4 (control type, hearts, bombs, fire, bomb type, position). It refreshes every 4 ticks and never captures input or the mouse, so game input keeps working.
+  - When it works: from the moment the game starts (after "Start game" or autostart), including the boot intro, menus and gameplay. F6 does nothing on the launcher screen. The toggle shows or hides the panel immediately from the input thread; only the text refresh waits for game ticks. It renders like other RmlUi contexts (the UI draw hook renders whenever any context is shown). Menus opened afterwards (Esc) draw on top of it.
+  - Logging: `[bm64 debug] Debug overlay created/shown/hidden`, and every 600 drawn UI frames a line with the panel's laid-out size and position, any visible document above it, and its first line of text (`recompui::note_debug_overlay_drawn`).
+- **Reserved function keys** (verified 2026-11-17):
+  - F1–F4: RT64 developer shortcuts (inspector, ray tracing, view RDRAM, texture replacements). These are active whenever the graphics config's `developer_mode` is true, which is this fork's default (`developer_mode_default` in `src/game/config.cpp`). RT64's SDL event filter swallows the key, so the game never sees it. F3 "view RDRAM" shows the native 4:3 framebuffer, which looks like an aspect-ratio switch.
+  - F8: RmlUi debugger (only when the UI's debug mode is on).
+  - F11 and Alt+Enter: fullscreen. Esc: in-game menu.
+  - F5/F7: quicksave and quickload, currently compiled out (`#if 0` in `src/game/input.cpp`).
+  - Avoid F10 (Windows menu-bar key) and F12 (Windows debugger break key). F6 and F9 are otherwise free; F6 is the overlay.
 
 ---
 
@@ -286,7 +336,7 @@ Host side: `src/game/bm64_debug.cpp` (`include/bm64_debug.h`). Overlay UI: `src/
 - Does any gameplay logic read sound state, so that audio timing could affect simulation?
 - Exact meaning of `func_80250E2C`, `func_802506B8`, `func_80250DC8` and the death, goal and transition flows.
 - Which overlay functions are enemy processes, and how a process maps to its object (`Process.user_data`?).
-- Contents of `0x800BEA60`–`0x80100000` and `0x8019B0D0`–`0x80225800`; where the audio heap lives.
+- Contents of `0x800BEA60`–`0x80100000` and `0x8019B0D0`–`0x8019C2E0`, `0x801E56C0`–`0x80225800`. (The audio heap is `0x8019C2E0`–`0x801E56C0`.)
 - Mutability of the camera tables at `0x8029FEA0`–`0x802A004C`.
 - Which per-player companion arrays besides `g_ComputerPlayerMovement` must grow with the player array.
 - World and boss identity of each map overlay (confirm by loading each map).
