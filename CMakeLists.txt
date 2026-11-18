@@ -63,6 +63,50 @@ target_compile_definitions(rmlui_core PRIVATE LUNASVG_BUILD_STATIC)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime)
 
+# In-memory EEPROM and a Controller Pak gate, compiled instead of the runtime's pi.cpp and pak.cpp.
+set(BM64_RUNTIME_GEN "${CMAKE_BINARY_DIR}/bm64_runtime")
+execute_process(
+    COMMAND python "${CMAKE_SOURCE_DIR}/tools/runtime/prepare_sandbox_sources.py"
+        "${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime/librecomp/src/pi.cpp"
+        "${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime/librecomp/src/pak.cpp"
+        "${BM64_RUNTIME_GEN}"
+    RESULT_VARIABLE BM64_RUNTIME_GEN_RESULT
+)
+if(NOT BM64_RUNTIME_GEN_RESULT EQUAL 0)
+    message(FATAL_ERROR "tools/runtime/prepare_sandbox_sources.py failed")
+endif()
+
+function(bm64_use_generated_runtime filename)
+    get_target_property(_srcs librecomp SOURCES)
+    set(_found FALSE)
+    set(_new)
+    foreach(_s IN LISTS _srcs)
+        get_filename_component(_name "${_s}" NAME)
+        if(_name STREQUAL filename)
+            list(APPEND _new "${BM64_RUNTIME_GEN}/${filename}")
+            set(_found TRUE)
+        else()
+            list(APPEND _new "${_s}")
+        endif()
+    endforeach()
+    if(NOT _found)
+        message(FATAL_ERROR "librecomp is missing ${filename}")
+    endif()
+    set_property(TARGET librecomp PROPERTY SOURCES "${_new}")
+endfunction()
+bm64_use_generated_runtime(pi.cpp)
+bm64_use_generated_runtime(pak.cpp)
+
+# Scalar float in the recompiled game must not contract to FMA, or two machines can desync.
+function(bm64_deterministic_fp target)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+        target_compile_options(${target} PRIVATE "SHELL:-Xclang -ffp-contract=off" "SHELL:-Xclang -fno-fast-math")
+    else()
+        target_compile_options(${target} PRIVATE -ffp-contract=off -fno-fast-math)
+    endif()
+endfunction()
+bm64_deterministic_fp(librecomp)
+
 target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/rt64/src)
 
 # RecompiledFuncs - Library containing the primary recompiler output
@@ -74,6 +118,7 @@ target_compile_options(RecompiledFuncs PRIVATE
     -Wno-unused-variable
     -Wno-implicit-function-declaration
 )
+bm64_deterministic_fp(RecompiledFuncs)
 
 target_include_directories(RecompiledFuncs PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -96,6 +141,7 @@ target_compile_options(PatchesLib PRIVATE
     -Wno-unused-variable
     -Wno-implicit-function-declaration
 )
+bm64_deterministic_fp(PatchesLib)
 
 target_include_directories(PatchesLib PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -174,6 +220,7 @@ set (SOURCES
     ${CMAKE_SOURCE_DIR}/src/game/minicoro.cpp
     ${CMAKE_SOURCE_DIR}/src/game/process_coroutines.cpp
     ${CMAKE_SOURCE_DIR}/src/game/bm64_debug.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/bm64_session.cpp
 
     ${CMAKE_SOURCE_DIR}/src/ui/ui_renderer.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/ui_state.cpp
@@ -431,5 +478,6 @@ endforeach()
 target_sources(BM64Recompiled PRIVATE ${GENERATED_NRM_SOURCES})
 
 target_sources(BM64Recompiled PRIVATE ${SOURCES})
+bm64_deterministic_fp(BM64Recompiled)
 
 set_property(TARGET BM64Recompiled PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

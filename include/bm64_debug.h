@@ -17,6 +17,10 @@
 //   BM64_REPLAY=<path>        replay a recording (uses a copy of the recorded save; your save is untouched).
 //                             The game refuses to start if both BM64_RECORD and BM64_REPLAY are set.
 //   BM64_SEED=<hex>           force the RNG seed (ignored while replaying)
+//   BM64_SANDBOX=1            keep EEPROM in memory; the user's save file is not written
+//   BM64_SANDBOX_IMAGE=<path> sandbox, starting from this image instead of the loaded save
+//   BM64_SANDBOX_EXPORT=<path> write the in-memory save image here on exit (replay does this too)
+//   BM64_CAMERA_BIAS=x,y,z    add this to the eye of the rendered lookAt only
 //   BM64_AUTOSTART=1          skip the launcher and start the game immediately
 //   BM64_DEBUG_OVERLAY=1      show the debug overlay (normally toggled with F6) from the moment the game starts
 //   BM64_EXIT_ON_REPLAY_END=1 quit when the replay runs out of input

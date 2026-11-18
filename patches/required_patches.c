@@ -1020,7 +1020,7 @@ RECOMP_PATCH void func_80225840(void *arg0) {
     func_8025E16C();
     id = Gfx_GetAvailableBuffer();
     func_8026C77C();
-    g_initRandom(bm64_session_seed((u32)osGetTime()));
+    g_initRandom(bm64_session_seed());
     temp_s0 = func_802998EC(0x1000); // mistake. This is secure mapped via the earlier set_secure_call_arr(5) call. Hudson called the unsecure function.
     func_80237890();
     HuPrcCreate(&func_80236F54, 0, (void*)temp_s0, 0x1000, 0x401);
@@ -1795,7 +1795,13 @@ static const f32 original_aspect_ratio = (f32)((f32)320/ (f32)240);
 
 // compute floating point matrix from float values for the given FrameBuffer
 RECOMP_PATCH void func_80227CD0(FBInfo *arg0, f32 xEye, f32 yEye, f32 zEye, f32 xAt, f32 yAt, f32 zAt, f32 xUp, f32 yUp, f32 zUp) {
-    func_8029B908(&arg0->mtx, xEye, yEye, zEye, xAt, yAt, zAt, xUp, yUp, zUp); // guLookAt
+    // BM64_CAMERA_BIAS adds to these arguments only. The camera block is not written.
+    f32 eye[3];
+    eye[0] = xEye;
+    eye[1] = yEye;
+    eye[2] = zEye;
+    bm64_camera_bias(eye);
+    func_8029B908(&arg0->mtx, eye[0], eye[1], eye[2], xAt, yAt, zAt, xUp, yUp, zUp); // guLookAt
     func_8029BB38(&D_802A5418, &arg0->mtx); // guMtxL2F
 
     // then scale the matrix to account for the border.
