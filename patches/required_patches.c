@@ -976,6 +976,11 @@ RECOMP_EXPORT void Recomp_ProcessCheats() {
     }
 }
 
+extern void func_8022997C(void);
+
+// Set by Gfx_EndRender when a frame is submitted; the texture scroll for it runs at the start of the next tick.
+static s32 texture_scroll_pending = 0;
+
 RECOMP_PATCH void func_80225840(void *arg0) {
     void *temp_s0; 
     Gfx *mainGfx;
@@ -1028,6 +1033,10 @@ RECOMP_PATCH void func_80225840(void *arg0) {
 
     while (TRUE) {
         bm64_debug_tick(gOverlayID);
+        if (texture_scroll_pending) {
+            texture_scroll_pending = 0;
+            func_8022997C();
+        }
         if (bm64_cheats_allowed()) {
             Recomp_ProcessCheats();
         }
@@ -1126,8 +1135,6 @@ RECOMP_PATCH void Gfx_Render(void *unused) {
         // switch the ID for everything else.
         gFrontBufferID ^= 1;
 
-        D_802A5800 = 0;
-
         scTask = &D_8029F608[bufferIDbackup];
         scTask->framebuffer = (u8*)&D_80100000[bufferIDbackup];
         scTask->list.t.ucode_boot = rspbootTextStart;
@@ -1145,7 +1152,6 @@ RECOMP_PATCH void Gfx_Render(void *unused) {
 
         func_80237A90(scTask);
         func_80237A70(&D_802A53A0, &sp5C);               
-        func_8022997C();
         D_802A5394 = D_802A5398;
     }
 }
@@ -1197,6 +1203,11 @@ RECOMP_PATCH void Gfx_EndRender(Gfx* gfx) {
 
     // if rendering has paused, do not send it to the scheduler handler.
     if (gPauseRender != 0) {
+        // @recomp The frames-since-render counter (blinking objects, func_802334CC) and the texture scroll
+        // (func_8022997C) are game memory: update them here on the game thread, never from Gfx_Render, so they
+        // don't depend on render timing or dropped frames.
+        D_802A5800 = 0;
+        texture_scroll_pending = 1;
         osSendMesg(&D_802A5330, D_8029F600, 0);
     }
 
