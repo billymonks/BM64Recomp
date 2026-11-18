@@ -5,6 +5,7 @@
 #include "PR/sched.h"
 #include "ultra_extensions.h"
 #include "cheats.h"
+#include "bm64_debug.h"
 
 #define ENABLE_WIDESCREEN_ASPECT_CHANGES
 
@@ -982,6 +983,9 @@ RECOMP_PATCH void func_80225840(void *arg0) {
     s32 frameTimer = 8;
     s32 temp_v0;
 
+    // Must run before func_80294E54 reads the save.
+    bm64_debug_boot();
+
     func_80297D20();
     Libc_Memset(&D_802A5300, 0, D_802B36D0 - D_802A5300);
     Libc_Memset(&D_80063000, 0, D_800BEA60 - D_80063000);
@@ -1011,7 +1015,7 @@ RECOMP_PATCH void func_80225840(void *arg0) {
     func_8025E16C();
     id = Gfx_GetAvailableBuffer();
     func_8026C77C();
-    g_initRandom(osGetTime());
+    g_initRandom(bm64_session_seed((u32)osGetTime()));
     temp_s0 = func_802998EC(0x1000); // mistake. This is secure mapped via the earlier set_secure_call_arr(5) call. Hudson called the unsecure function.
     func_80237890();
     HuPrcCreate(&func_80236F54, 0, (void*)temp_s0, 0x1000, 0x401);
@@ -1023,7 +1027,10 @@ RECOMP_PATCH void func_80225840(void *arg0) {
     D_802B36AC = free_hook;
 
     while (TRUE) {
-        Recomp_ProcessCheats();
+        bm64_debug_tick(gOverlayID);
+        if (bm64_cheats_allowed()) {
+            Recomp_ProcessCheats();
+        }
         func_8023A104();           // receive message from the cont mesg queue and run osContGetReadData
         mainGfx = Gfx_InitGfx();   // init gfx
         ThreadProc_RunQueuedThreads();           // get thread pri/start some kind of thread.

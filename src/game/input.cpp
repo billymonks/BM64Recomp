@@ -6,6 +6,7 @@
 #include "recomp_input.h"
 #include "zelda_config.h"
 #include "recomp_ui.h"
+#include "bm64_debug.h"
 #include "SDL.h"
 #include "promptfont.h"
 #include "GamepadMotion.hpp"
@@ -116,6 +117,9 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
                 keyevent->keysym.scancode == SDL_Scancode::SDL_SCANCODE_F11
             ) {
                 recompui::toggle_fullscreen();
+            }
+            if (keyevent->keysym.scancode == SDL_Scancode::SDL_SCANCODE_F3 && ultramodern::is_game_started()) {
+                bm64::debug::request_overlay_toggle();
             }
             if (scanning_device != recomp::InputDevice::COUNT) {
                 if (keyevent->keysym.scancode == SDL_Scancode::SDL_SCANCODE_ESCAPE) {

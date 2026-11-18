@@ -238,6 +238,7 @@ public:
         launcher_menu_controller->load_document();
         config_menu_controller->load_document();
         recompui::init_prompt_context();
+        recompui::init_debug_overlay();
     }
 
     void unload() {

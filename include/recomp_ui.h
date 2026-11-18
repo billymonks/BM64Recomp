@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <list>
+#include <vector>
 
 // TODO move this file into src/ui
 
@@ -88,6 +89,10 @@ namespace recompui {
 
     void init_styling(const std::filesystem::path& rcss_file);
     void init_prompt_context();
+
+    void init_debug_overlay();
+    void set_debug_overlay_shown(bool shown);
+    void set_debug_overlay_lines(const std::vector<std::string>& lines);
     void open_choice_prompt(
         const std::string& header_text,
         const std::string& content_text,
