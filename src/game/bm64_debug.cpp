@@ -19,6 +19,7 @@
 #include "ultramodern/ultramodern.hpp"
 #include "recomp_ui.h"
 #include "bm64_debug.h"
+#include "bm64_session.h"
 
 namespace {
     constexpr uint32_t num_ports = 4;
@@ -74,8 +75,6 @@ namespace {
         std::vector<uint8_t> replay_frames;
         size_t replay_cursor = 0;
         uint32_t replay_seed = 0;
-        bool seed_forced = false;
-        uint32_t forced_seed = 0;
         uint32_t seed = 0;
 
         std::vector<HashRange> ranges = default_ranges();
@@ -303,6 +302,7 @@ namespace {
     }
 
     void exit_game(const char* reason) {
+        bm64::session::export_if_requested();
         state.exiting = true;
         if (state.hash_log) {
             std::fclose(state.hash_log);
@@ -318,10 +318,21 @@ namespace {
 
     void setup_recording(const char* path) {
         std::filesystem::path save_path = ultramodern::get_save_file_path();
-        std::vector<uint8_t> save = read_file(save_path);
-        state.record_file.open(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+        // The image the game is about to read, which is the sandbox image when one is installed.
+        std::vector<uint8_t> save(ultramodern::save_image_size());
+        if (!save.empty()) {
+            ultramodern::export_save_image(save.data(), save.size());
+        }
+        std::filesystem::path record_path(path);
+        std::error_code ec;
+        if (record_path.has_parent_path()) {
+            std::filesystem::create_directories(record_path.parent_path(), ec);
+        }
+        state.record_file.open(record_path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
         if (!state.record_file.good()) {
-            fprintf(stderr, "[bm64 debug] Could not open recording %s\n", path);
+            fprintf(stderr, "[bm64 debug] Could not open recording %s\n", record_path.string().c_str());
+            ultramodern::error_handling::message_box(
+                ("Could not open the recording file:\n" + record_path.string() + "\n\nThe game is running, but this session is not being recorded.").c_str());
             return;
         }
         state.record_file.write(recording_magic, sizeof(recording_magic));
@@ -331,7 +342,8 @@ namespace {
         state.record_file.write(reinterpret_cast<const char*>(save.data()), save.size());
         state.record_file.flush();
         state.input_mode = InputMode::Record;
-        printf("[bm64 debug] Recording input to %s (save %s, %zu bytes)\n", path, save_path.string().c_str(), save.size());
+        printf("[bm64 debug] Recording input to %s (save image %zu bytes, file %s)\n",
+            path, save.size(), save_path.string().c_str());
     }
 
     void setup_replay(const char* path) {
@@ -349,24 +361,18 @@ namespace {
             return;
         }
 
-        // Replay against a copy of the recorded save so the user's real save is never read or written.
-        std::filesystem::path live_save = ultramodern::get_save_file_path();
-        std::filesystem::path replay_save = live_save.parent_path() / "replay" / live_save.filename();
-        std::filesystem::create_directories(replay_save.parent_path());
-        std::filesystem::remove(replay_save);
-        if (save_size != 0) {
-            std::ofstream out{ replay_save, std::ios::binary };
-            out.write(reinterpret_cast<const char*>(data.data() + cursor), save_size);
+        if (!bm64::session::begin_sandbox(data.data() + cursor, save_size)) {
+            fprintf(stderr, "[bm64 debug] %s save image was not installed; playing live\n", path);
+            return;
         }
-        ultramodern::change_save_file(u8"replay", recomp::current_game_id());
         cursor += save_size;
 
         state.replay_seed = seed;
         state.replay_frames.assign(data.begin() + cursor, data.end());
         state.replay_cursor = 0;
         state.input_mode = InputMode::Replay;
-        printf("[bm64 debug] Replaying %s: seed %08X, %zu input frames, save copied to %s\n",
-            path, seed, state.replay_frames.size() / (num_ports * pad_size), replay_save.string().c_str());
+        printf("[bm64 debug] Replaying %s: seed %08X, %zu input frames, save sandboxed\n",
+            path, seed, state.replay_frames.size() / (num_ports * pad_size));
     }
 
     const char* overlay_name(int32_t id, char* buf, size_t len) {
@@ -518,10 +524,28 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
         printf("[bm64 debug] Cheats disabled (BM64_DISABLE_CHEATS)\n");
     }
     if (const char* seed = env("BM64_SEED")) {
-        state.seed_forced = parse_hex(seed, state.forced_seed);
-        if (!state.seed_forced) {
+        uint32_t parsed = 0;
+        if (parse_hex(seed, parsed)) {
+            bm64::session::set_seed(parsed);
+        }
+        else {
             fprintf(stderr, "[bm64 debug] Ignoring BM64_SEED=%s (expected hex)\n", seed);
         }
+    }
+    if (const char* bias = env("BM64_CAMERA_BIAS")) {
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+        if (std::sscanf(bias, "%f,%f,%f", &x, &y, &z) == 3) {
+            bm64::session::set_camera_bias(x, y, z);
+            printf("[bm64 session] Rendered camera eye bias %g, %g, %g\n", x, y, z);
+        }
+        else {
+            fprintf(stderr, "[bm64 debug] Ignoring BM64_CAMERA_BIAS=%s (expected x,y,z)\n", bias);
+        }
+    }
+    if (const char* exp = env("BM64_SANDBOX_EXPORT")) {
+        bm64::session::set_export_path(exp);
     }
 
     const char* replay = env("BM64_REPLAY");
@@ -529,18 +553,35 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
     if (replay) {
         setup_replay(replay);
     }
-    else if (record) {
-        setup_recording(record);
+    else {
+        if (const char* image = env("BM64_SANDBOX_IMAGE")) {
+            std::vector<uint8_t> bytes = read_file(image);
+            if (bytes.empty()) {
+                fprintf(stderr, "[bm64 session] Could not read sandbox image %s\n", image);
+                bm64::session::begin_sandbox(nullptr, 0);
+            }
+            else {
+                bm64::session::begin_sandbox(bytes.data(), bytes.size());
+            }
+        }
+        else if (env("BM64_SANDBOX")) {
+            bm64::session::begin_sandbox(nullptr, 0);
+        }
+        if (record) {
+            setup_recording(record);
+        }
     }
 }
 
 extern "C" void bm64_session_seed(uint8_t* rdram, recomp_context* ctx) {
-    uint32_t seed = _arg<0, uint32_t>(rdram, ctx);
+    (void)rdram;
+    uint32_t seed;
     if (state.input_mode == InputMode::Replay || state.input_mode == InputMode::ReplayEnded) {
         seed = state.replay_seed;
+        printf("[bm64 session] RNG seed %08X (replay)\n", seed);
     }
-    else if (state.seed_forced) {
-        seed = state.forced_seed;
+    else {
+        seed = bm64::session::resolve_seed();
     }
     state.seed = seed;
 

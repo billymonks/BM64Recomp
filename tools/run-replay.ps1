@@ -16,6 +16,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$DumpTicks = "",
     [string]$Ranges = "",
+    [string]$CameraBias = "",
+    [string]$SandboxExport = "",
     [string]$Exe = "build\BM64Recompiled.exe",
     [switch]$Overlay,
     [int]$TimeoutSec = 600
@@ -41,21 +43,37 @@ try {
     $env:BM64_DUMP_DIR = Join-Path $outFull "dumps"
     $env:BM64_HASH_RANGES = $Ranges
     $env:BM64_DEBUG_OVERLAY = if ($Overlay) { "1" } else { "" }
+    $env:BM64_CAMERA_BIAS = $CameraBias
+    $env:BM64_SANDBOX_EXPORT = $SandboxExport
     Remove-Item Env:BM64_RECORD -ErrorAction SilentlyContinue
 
     $p = Start-Process -FilePath (Resolve-Path $Exe).Path -WorkingDirectory $Repo -PassThru `
         -RedirectStandardOutput (Join-Path $outFull "stdout.txt") -RedirectStandardError (Join-Path $outFull "stderr.txt")
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+    $exited = $p.WaitForExit($TimeoutSec * 1000)
+    if (-not $exited) {
         Write-Warning "Replay still running after $TimeoutSec s; killing it"
         $p.Kill()
         $p.WaitForExit()
-        exit 1
+        $script:ReplayExit = 1
+    }
+    else {
+        # The timeout overload can return before redirected stdout has closed, which leaves ExitCode empty.
+        $null = $p.WaitForExit()
+        if ($null -eq $p.ExitCode -or $p.ExitCode -eq 0) {
+            $script:ReplayExit = 0
+        }
+        else {
+            Write-Warning "Replay process exited with code $($p.ExitCode)"
+            $script:ReplayExit = $p.ExitCode
+        }
     }
     Write-Host "Replay finished (exit code $($p.ExitCode)); log: $env:BM64_HASH_LOG"
 }
 finally {
-    foreach ($v in "BM64_AUTOSTART", "BM64_EXIT_ON_REPLAY_END", "BM64_REPLAY", "BM64_HASH_LOG", "BM64_DUMP_TICKS", "BM64_DUMP_DIR", "BM64_HASH_RANGES", "BM64_HASH_DEAD_STACKS", "BM64_DEBUG_OVERLAY") {
+    foreach ($v in "BM64_AUTOSTART", "BM64_EXIT_ON_REPLAY_END", "BM64_REPLAY", "BM64_HASH_LOG", "BM64_DUMP_TICKS", "BM64_DUMP_DIR", "BM64_HASH_RANGES", "BM64_HASH_DEAD_STACKS", "BM64_DEBUG_OVERLAY", "BM64_CAMERA_BIAS", "BM64_SANDBOX_EXPORT") {
         Remove-Item "Env:$v" -ErrorAction SilentlyContinue
     }
     Pop-Location
 }
+if ($null -eq $script:ReplayExit) { $script:ReplayExit = 1 }
+exit $script:ReplayExit

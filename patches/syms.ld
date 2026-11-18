@@ -96,3 +96,4 @@ bm64_session_seed = 0x8F000150;
 bm64_cheats_allowed = 0x8F000154;
 bm64_debug_tick = 0x8F000158;
 bm64_input_filter = 0x8F00015C;
+bm64_camera_bias = 0x8F000160;
