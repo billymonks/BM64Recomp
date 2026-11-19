@@ -117,10 +117,10 @@ extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
     if (!s.on || s.players <= 1) {
         return;
     }
-    // The spawn loop in func_80245CDC visits slots 0..4. Rival maps already use 1..3.
+    // func_80245CDC visits every reserved slot. Rival maps already use 1..3.
     bool rival = rival_map(s.overlay);
     int placed = 0;
-    for (int i = 0; i < 5 && placed < s.players; i++) {
+    for (int i = 0; i < bm64::coop::kPlayerSlots && placed < s.players; i++) {
         if (rival && (i == 1 || i == 2 || i == 3)) {
             continue;
         }
@@ -131,7 +131,7 @@ extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
         placed++;
     }
     if (placed < s.players) {
-        std::printf("[bm64 coop] Overlay %d fit %d of %d players into the 5-slot spawn loop\n",
+        std::printf("[bm64 coop] Overlay %d fit %d of %d players into the spawn loop\n",
             s.overlay, placed, s.players);
     }
 }

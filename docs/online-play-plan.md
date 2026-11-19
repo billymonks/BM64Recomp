@@ -19,13 +19,34 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
 ## Decisions already made
 
 - **Netcode**: rollback, applied at the controller-input layer. Sessions start from boot with a shared RNG seed and the host's save; there's no mid-session state transfer in v1.
-- **Transport**: Discord Social SDK for identity, presence, invites and lobbies. Game packets go peer-to-peer over UDP with ICE NAT traversal and a TURN relay fallback, signalled through the Discord lobby.
+- **Transport**: Discord Social SDK for identity, presence, invites and lobbies. Game packets are peer-to-peer UDP. Discord only exchanges the addresses. A TURN relay is optional, for pairs whose NATs will not open a direct path. See "P2P, and when a TURN server is involved" below.
 - **Cameras**: one camera simulated per player on every machine. Each client renders only its own camera; each player's C-buttons rotate their own camera.
 - **Main player**: story code's "main player" (`D_802AC894`) is virtualized per context (camera, AI, triggers, cutscenes, HUD).
 - **Lives**: one shared party pool, plus an "unlimited lives" co-op option.
 - **Death in co-op**: the dead player respawns at the stage start or at the last screen transition, while teammates keep playing; it costs one shared life. Game over happens only when the party is wiped with no lives left.
 - **Player slots**: relocate `g_Players` to a larger array so 4 co-op players fit in every map, including the rival-bomber maps.
 - **Sharing**: progression (stage clears, gold cards, world progress) is shared because it's one simulation. Power-ups (bombs, fire, remote and red bombs, hearts) stay per player. The host's save is authoritative, and guests can optionally merge unlocks at the end.
+
+## P2P, and when a TURN server is involved
+
+Checked against Discord's Social SDK docs in November 2026. The game does not need a TURN server to play online with Discord. Most sessions are direct UDP between the players. TURN is the fallback for the pairs that cannot open that path.
+
+Discord is the introduction, not the pipe. The Social SDK gives account linking, rich presence, invites, and lobbies with text, voice, and a small metadata blob (lobby metadata is string pairs, 1000 characters total). It has no API that sends game datagrams, and it does not run STUN or TURN for you. The old Game SDK did have a networking manager, and that one was a relay through Discord's servers (they refused real peer-to-peer so a player's IP stayed hidden). Those features were decommissioned on 2 May 2023. Lobby chat cannot stand in for it either: in development, `SendLobbyMessage` and lobby metadata updates are each capped at 100 requests per 2 hours per application. That is enough to exchange a few ICE candidates when a match starts. It is not a 60 Hz input channel.
+
+What each machine actually sends:
+
+| Path | Who runs it | What it is for |
+|---|---|---|
+| Host candidate | This game, already (`bm64::ice::host_candidate`) | The bound UDP port. Enough on one LAN, or when the host has a public address or a forwarded port. |
+| STUN + hole punch | A public STUN server (for example `stun.l.google.com:19302`) plus libjuice in this game | Each peer learns its public mapped address, they trade those strings through the lobby, and both send a UDP packet so the NATs open. No byte of gameplay is relayed. |
+| TURN | A relay we would run or rent (`BM64_TURN_HOST`) | Both peers send every packet to that server, which copies them across. Used only after the direct paths fail. |
+
+Direct UDP is the path rollback wants. Input is predicted and corrected at 60 Hz, so an extra hop through a relay costs delay on every tick of that match, and the relay's bandwidth is ours to pay. A TURN server is worth running later if playtests show pairs that gather no host or server-reflexive candidate: symmetric NAT, carrier-grade NAT on both sides, or a firewall that drops unsolicited UDP. Until that shows up, phase 5 does not depend on one. Same-LAN play and a port-forwarded host do not use STUN or TURN at all, once the lobby actually delivers the host candidate (today `publish_candidate` only stores it locally).
+
+Two consequences to keep:
+
+- A direct connection tells each player the other's public IP. That is the tradeoff the old Discord relay existed to avoid. For invites between friends it is the same exposure as any other peer-to-peer game. Hiding addresses means publishing only a TURN candidate, which forces every match through the relay, including pairs that could have connected directly.
+- `BM64_HAS_LIBJUICE` stays off until libjuice is in the tree. Setting `BM64_TURN_HOST` today only changes a log line. It does not dial a relay.
 
 ---
 
@@ -127,7 +148,7 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
 
 ## Phase 3 – In-process savestates (main technical risk)
 
-Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test.bm64rec` (9,591 ticks) before and after the player-array move. `new.bm64rec` passed before that move and, after it, mismatches at tick 8448 in process 11's inline stack (see phase 6.1). Savetest at tick 200 for 60 ticks: save 336 µs, load 243 µs, 717 µs per resimulated tick. Two ordinary replays of the first 200 ticks hashed identically. Every other arena and story world is still open. A patch edit needs two builds before new host calls resolve. The `g_Players` cheat writes were in `patches.c` after one build on this pass (`0x80F0`).
+Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test.bm64rec` (9,591 ticks) before and after the player-array move. `new.bm64rec` passed before that move. After it, the same mode failed at tick 8448 in the o32 argument home of process 11 (`func_8023F26C`); the hash now skips those 16 bytes (see phase 6.1). Savetest at tick 200 for 60 ticks: save 336 µs, load 243 µs, 717 µs per resimulated tick. Two ordinary replays of the first 200 ticks hashed identically. Every other arena and story world is still open. A patch edit needs two builds before new host calls resolve. The `g_Players` cheat writes were in `patches.c` after one build on this pass (`0x80F0`).
 
 - [x] **3.1 Final snapshot memory map**
   - Depends on: 0.3, 2.6.
@@ -168,7 +189,7 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
   - Depends on: 3.7.
   - Work: a debug mode that runs every tick as save, step, load, step, compare hashes (like GGPO's SyncTest), with a configurable rollback depth.
   - Done when: SyncTest runs clean through every Battle arena and every story world. Fix or document every mismatch.
-  - Note: `BM64_SYNCTEST=1` exited clean on `test.bm64rec` (tick 9591) after the player move. `new.bm64rec` exited clean before that move. After it, the same mode fails at tick 8448 (process 11 stack). Every other arena and story world is still open.
+  - Note: `BM64_SYNCTEST=1` exited clean on `test.bm64rec` (tick 9591) after the player move. `new.bm64rec` exited clean before that move, then failed at tick 8448 until the hash skipped the o32 argument home (phase 6.1). Every other arena and story world is still open.
 - [ ] **3.9 Player quicksave (optional)**
   - Depends on: 3.7.
   - Work: user-facing quicksave/quickload built on 3.7. Same session only; native stacks aren't portable across runs.
@@ -217,13 +238,13 @@ The session is our own code in `src/net/` (not GGPO or GekkoNet). `bm64_net_test
 
 ## Phase 5 – Online Battle
 
-Code for a loopback lobby is in the build. A Discord application, a TURN relay, and two PCs are still required before anyone off this machine can connect. Do not invent an application id. `BM64_HAS_LIBJUICE` and `BM64_LINK_DISCORD` are CMake options and both default off; turning one on stops the build at the function where that client belongs (`src/net/ice.cpp`, `src/net/signalling.cpp`). `bm64::signalling::kApplicationId` is the empty slot for an application id.
+Code for a loopback lobby is in the build. A Discord application and two PCs are still required before anyone off this machine can connect. A TURN relay is not. Direct UDP covers the same LAN, a forwarded port, and (once libjuice is linked) ordinary home NATs via STUN hole punching. Do not invent an application id. `BM64_HAS_LIBJUICE` and `BM64_LINK_DISCORD` are CMake options and both default off; turning one on stops the build at the function where that client belongs (`src/net/ice.cpp`, `src/net/signalling.cpp`). `bm64::signalling::kApplicationId` is the empty slot for an application id.
 
 - [ ] **5.1 Internet transport**
   - Depends on: 4.7.
-  - Work: UDP with ICE (libjuice or GameNetworkingSockets) and a configurable TURN relay. Signalling goes through an interface, so 5.3 can plug Discord in.
-  - Done when: two PCs behind different NATs connect, or fall back to the relay.
-  - Note: the session binds a UDP socket and publishes that endpoint as a host candidate (`bm64::ice::host_candidate`). `BM64_TURN_HOST` is printed and not dialed, because libjuice is not linked. Loopback peers still use `BM64_NET_PEER`. Two-PC NAT is blocked on a relay and a second machine.
+  - Work: UDP with ICE (libjuice). Gather a host candidate and a server-reflexive candidate from a public STUN server, and hole-punch. A TURN server (`BM64_TURN_HOST`) is a later fallback, not part of getting the first two-PC match up. Signalling goes through an interface, so 5.3 can plug Discord in.
+  - Done when: two PCs behind different home NATs connect without a relay. Pairs that cannot punch are reported and left for the TURN fallback.
+  - Note: the session binds a UDP socket and publishes that endpoint as a host candidate (`bm64::ice::host_candidate`). `BM64_TURN_HOST` is printed and not dialed, because libjuice is not linked. Loopback peers still use `BM64_NET_PEER`. Two-PC NAT is blocked on linking libjuice, exchanging candidates, and a second machine. It is not blocked on running a TURN server.
 - [ ] **5.2 Discord Social SDK**
   - Depends on: 0.1.
   - Work: register the app, then implement account linking, rich presence, and lobby create/join with invites. Check current SDK capabilities and terms first, and record them here.
@@ -252,13 +273,13 @@ Code for a loopback lobby is in the build. A Discord application, a TURN relay, 
 
 ## Phase 6 – Story co-op gameplay
 
-The player array move is in the binary and the loopback session can run it. Story rules that would change single-player combat, triggers, cutscenes, or the HUD were not rewritten: those need a played stage, and `new.bm64rec` already desyncs. Loops still visit five slots. Rival maps therefore fit two co-op players (slots 0 and 4), and other maps fit four (slots 0–3).
+The player array move is in the binary and the loopback session can run it. Story rules that would change single-player combat, triggers, cutscenes, or the HUD were not rewritten: those need a played stage. Loops visit eight slots. Rival maps leave slots 0 and 4–7 for co-op players, and other maps use 0–3.
 
-- [ ] **6.1 Relocate the player array**
+- [x] **6.1 Relocate the player array**
   - Depends on: 3.8.
   - Work: a script in `tools/re` generates `[[patches.instruction]]` entries that repoint every main-code reference to `g_Players` (`0x800AEDF0`–`0x800AF1D8`, about 143 functions) to a larger array in patch RAM (`0x80801000+`). It also widens the 4- and 5-slot loops and relocates per-player companion arrays (`g_ComputerPlayerMovement` and any found during the work). Add a checker that proves no old-range references remain.
   - Done when: SyncTest still passes, and Battle and story are unaffected with 5 slots in use.
-  - Note: `tools/re/relocate_players.py --write` emitted 257 main-code references (514 instruction patches). Overlays and data words do not point at the array. The array the game uses is `0x80F00000` (eight slots reserved, loops still end at `+0x3E8`). `func_802506B8`'s uses of `D_800AF1D8` as the next table are not moved. The snapshot and the `slots` hash include `0x80F00000`–`0x80F00640`. Without that, rollback left a stale object pointer and faulted in `func_802511EC`. Boot zeroes the new array. SyncTest of `test.bm64rec` exited 0 at tick 9591. `new.bm64rec` fails at tick 8448: process 11's inline stack `0x80069278`–`0x80069A78` (header matches; dead-stack mask did not drop these bytes). Two loopback peers stayed in sync through tick 200 and four through tick 100, both with unlimited lives and zero pads. Companion arrays were not moved, and the 5-slot loops were not widened. Battle and story were not played.
+  - Note: `tools/re/relocate_players.py` repoints the main-code references (`--check` covers them) and widens the 4- and 5-slot player loops to 8. `g_ComputerPlayerMovement` is at `0x80F00640` (8 × `0x10`). `func_80241BB0`'s side table is at `0x80F006C0`, with its original bytes copied at boot. `func_802506B8` and `func_8024ABA8` still use `D_800AF1D8` as the next table. The 4-port controller map in `func_8023D0F8` stays at 4. The snapshot and the `slots` hash are `0x80F00000`–`0x80F00780`. SyncTest after the widen exited 0: `new.bm64rec` at tick 8838 and `test.bm64rec` at tick 9591. A battle match was not played.
 - [ ] **6.2 Call-site catalogue**
   - Depends on: 0.2.
   - Work: classify every `getMainPlayer()` use, every direct `D_802AC894` reader, and every constant-index `getPlayerObj`/`getPlayerPos` call, per overlay. Categories: camera, enemy or boss targeting, trigger or goal, cutscene or script, HUD, rival-bomber control, other. Put the table in `game-internals.md`.
@@ -268,7 +289,7 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.1.
   - Work: in co-op, mark the co-op players' slots human before `func_80245CDC`. Allocate slots that don't collide with rival bombers in maps 4.10, 5.7, 6.15, 8.13, 9.5 and 9.6. Spawn teammates next to the leader.
   - Done when: 2–4 bombers spawn in every story map.
-  - Note: `bm64_coop_before_stage` runs at the start of `func_80245CDC` when the session has more than one player. It sets `controlType` 1 on empty slots, skipping 1–3 on the six rival maps, and logs when the 5-slot loop cannot fit everyone. Teammates are not moved next to the leader. No story map was entered.
+  - Note: `bm64_coop_before_stage` runs at the start of `func_80245CDC` when the session has more than one player. It sets `controlType` 1 on empty slots, skipping 1–3 on the six rival maps, and logs when the 8-slot loop cannot fit everyone. Teammates are not moved next to the leader. No story map was entered.
 - [ ] **6.4 Main-player virtualization framework**
   - Depends on: 6.2, 6.3.
   - Work: patch `func_80243DDC` and the 27 direct readers to ask a context resolver ("who is the main player for the current process?"), keyed on the current process (`D_802AC344`) and the category from 6.2. The default returns the leader (slot 0). The resolver's state lives in game memory, so it's snapshotted.
@@ -325,7 +346,7 @@ The player array move is in the binary and the loopback session can run it. Stor
 
 ## Phase 7 – Online co-op
 
-The playtest itself is blocked: it needs a Discord login, a TURN server, a second PC, and the phase 6 story playthroughs. What can run on loopback is the phase 4 session plus the lives flag. No snapshot is sent to a rejoining guest.
+The playtest itself is blocked: it needs a Discord login, a second PC, and the phase 6 story playthroughs. A TURN server is not part of that list; direct UDP is the session path, and a relay is only for NATs that will not punch (see "P2P, and when a TURN server is involved"). What can run on loopback is the phase 4 session plus the lives flag. No snapshot is sent to a rejoining guest.
 
 - [ ] **7.1 Co-op session flow**
   - Depends on: 5.4, 6.14–6.19.

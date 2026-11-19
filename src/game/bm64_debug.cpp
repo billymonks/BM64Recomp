@@ -58,7 +58,7 @@ namespace {
             { "prc",  { { 0x802AB200, 0x802AC3E0 } } },
             { "game", { { 0x802AC400, 0x802AD120 }, { 0x802AFC20, 0x802B36D0 } } },
             { "heap", { { 0x802B36D0, 0x80400000 } } },
-            { "slots", { { 0x80F00000, 0x80F00640 } } },
+            { "slots", { { 0x80F00000, bm64::coop::kStateEnd } } },
         };
     }
 
@@ -224,8 +224,10 @@ namespace {
     }
 
     // Process stack memory below a suspended process's sp holds stale values (sometimes audio-heap pointers left by
-    // sound calls) that never affect the game. Unused inline stacks (free pool entries, or processes that were given
-    // their own stack) are dead entirely. Returns sorted, non-overlapping ranges.
+    // sound calls) that never affect the game. The 16 bytes at sp are the o32 argument home: a callee may spill
+    // a0-a3 there, and a yield inside that call leaves the same kind of scratch (new.bm64rec tick 8448, process
+    // func_8023F26C, word at sp was 0 on one pass and 0xB on the other). Unused inline stacks (free pool entries,
+    // or processes that were given their own stack) are dead entirely. Returns sorted, non-overlapping ranges.
     std::vector<Segment> dead_stacks(uint8_t* rdram) {
         std::vector<bm64::debug::ProcessStack> live;
         bm64::debug::get_process_stacks(live);
@@ -243,7 +245,14 @@ namespace {
                     s = &l;
                 }
             }
-            auto live_sp = [&](uint32_t lo, uint32_t hi) { return (s->sp > lo && s->sp <= hi) ? s->sp : hi; };
+            // Dead up through the 16-byte o32 argument home. Offsets at and above sp+0x10 are the frame proper.
+            auto live_sp = [&](uint32_t lo, uint32_t hi) {
+                if (s->sp > lo && s->sp <= hi) {
+                    uint32_t above = s->sp + 0x10;
+                    return above < hi ? above : hi;
+                }
+                return hi;
+            };
             if (s != nullptr && sptop == inline_lo) {
                 dead.push_back({ inline_lo, live_sp(inline_lo, inline_hi) });
                 continue;
@@ -516,10 +525,17 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     if (bm64::coop::kPlayerBase >= 0x80800000u) {
-        std::memset(rdram + (bm64::coop::kPlayerBase - 0x80000000u), 0,
-            bm64::coop::kPlayerStride * static_cast<uint32_t>(bm64::coop::kPlayerSlots));
-        std::printf("[bm64 coop] Player array at %08X (%d slots reserved, spawn loop visits 5)\n",
-            bm64::coop::kPlayerBase, bm64::coop::kPlayerSlots);
+        uint8_t* slots = rdram + (bm64::coop::kPlayerBase - 0x80000000u);
+        std::memset(slots, 0, bm64::coop::kStateEnd - bm64::coop::kPlayerBase);
+        // func_80243BF0 sets field 0x18 to 0x200 on the original slots. The extra slots get the same value.
+        for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+            uint32_t addr = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride + 0x18;
+            *reinterpret_cast<uint32_t*>(rdram + (addr - 0x80000000u)) = 0x200;
+        }
+        std::memcpy(rdram + (bm64::coop::kHudBase - 0x80000000u),
+            rdram + (bm64::coop::kHudOld - 0x80000000u), bm64::coop::kHudCopy);
+        std::printf("[bm64 coop] Player array at %08X (%d slots, movement at %08X)\n",
+            bm64::coop::kPlayerBase, bm64::coop::kPlayerSlots, bm64::coop::kMoveBase);
     }
 
     if (const char* ranges = env("BM64_HASH_RANGES")) {

@@ -143,7 +143,7 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
 
 ## 6. Players (verified unless marked)
 
-- **`g_Players`**: stride `0xC8` (200 bytes). The retail array is `0x800AEDF0` (5 slots). `tools/re/relocate_players.py` rewrites the main-code address setups so the game uses `0x80F00000`, where eight slots are reserved. Spawn and update loops still stop at five (`base + 0x3E8`). `D_800AF1D8` stays the next table (`func_802506B8` is not rewritten). The bytes at `0x80F00000` are in the snapshot and the `slots` hash range; a rollback that restored every other range and left this one dirty faulted on the bomber's body pointer. With that range saved, SyncTest of `test.bm64rec` passes (9,591 ticks). `new.bm64rec` mismatches at tick 8448 in process 11's inline stack (`0x80069278`–`0x80069A78`). The process header matches, so this is stack contents the dead-stack mask did not drop. The player-array range itself is not the mismatched range. `func_80243BF0` initialises slots 0–3.
+- **`g_Players`**: stride `0xC8` (200 bytes). The retail array is `0x800AEDF0` (5 slots). `tools/re/relocate_players.py` rewrites the main-code address setups so the game uses `0x80F00000`, and the player loops visit eight slots (`base + 0x640`). `D_800AF1D8` stays the next table: `func_802506B8` and `func_8024ABA8` still index it, and the script's checker rejects a patch that moves those uses. `g_ComputerPlayerMovement` (stride `0x10`) is at `0x80F00640`, eight entries. `func_80241BB0` writes a `0x14`-stride side table at `0x80F006C0`; boot copies the original `0x64` bytes from `0x802A07D4`. The 4-port controller assignment in `func_8023D0F8` still walks four words at `0x802AC660`. The bytes `0x80F00000`–`0x80F00780` are in the snapshot and the `slots` hash. A rollback that restored every other range and left the player array dirty faulted on the bomber's body pointer. `func_80243BF0` initialises the retail slots; boot also sets field `0x18` to `0x200` on all eight. Empty slots stay `controlType` 0, so the extra iterations do not spawn or simulate a bomber.
 - **Field map** (offsets confirmed by accessors; the struct in `required_patches.c` agrees up to `0x28`):
 
 | Offset | Field |
@@ -177,12 +177,12 @@ Every map overlay calls stage setup (`func_80245CDC`) once, with a map ID consta
 - **Stage player setup** `func_80245CDC`:
   - Sets the main player to 0.
   - Allocates a 0x1000-byte stack and creates the player manager process `func_8024FFF0` (priority `0x70`).
-  - Calls `g_SpawnPlayer(i)` (`0x802459BC`) for every slot 0–4 with controlType ≠ 0.
+  - Calls `g_SpawnPlayer(i)` (`0x802459BC`) for every slot 0–7 with controlType ≠ 0.
   - Then runs `func_80237664` (camera reset, likely) and `func_802362D4(0x1F)`, and initialises per-stage globals (`D_802AC8BC`, `D_802ACA24`, `D_802AC95C`, …).
   - If `g_LevelLoader & 4`, it allocates enemies with `g_EnemyAllocate(3, 0x1C, 0xD2)`.
   - **Consequence**: marking more slots human before stage setup spawns more bombers.
-- **Per-bomber logic**: `func_8024E088(i)` (0x1F68 bytes, driven by `func_8024FFF0`). Human players read the port with their index through `func_80239880(i, …)`; AI reads `g_ComputerPlayerMovement` (`0x802ACF08`, stride `0x10`). Bomber object update: `func_802553D4` (0x71BC bytes).
-- **Story maps that drive slots 1–3** (rival bombers or actors; call `setMainPlayer(1/2)` and/or `getPlayerObj(1..3)`): 4.10, 5.7, 6.15, 8.13 (slots 1, 2 and 3), 9.5, 9.6. Map 8.13 leaves one free slot under the 5-slot cap.
+- **Per-bomber logic**: `func_8024E088(i)` (0x1F68 bytes, driven by `func_8024FFF0`, which visits eight slots and runs a slot only when its controlType is human or AI). Human players read the port with their index through `func_80239880(i, …)`; AI reads `g_ComputerPlayerMovement` (`0x80F00640`, stride `0x10`, eight entries). Bomber object update: `func_802553D4` (0x71BC bytes).
+- **Story maps that drive slots 1–3** (rival bombers or actors; call `setMainPlayer(1/2)` and/or `getPlayerObj(1..3)`): 4.10, 5.7, 6.15, 8.13 (slots 1, 2 and 3), 9.5, 9.6. With eight slots those maps still have room for co-op players in slots 0 and 4–7.
 - **Main-player sequences**: `func_80250E2C` (called with argument 1 from about 30 map overlays; camera, sound and sleeps, keyed on `D_802AC894`) and `func_802506B8` (iterates per-player tables). These are candidates for goal, death or transition flows (likely).
 - **Story globals**: lives `D_802AC624`, credits `D_802AC628`. Stage HUD values are in struct `D_802AC610`: `+0x1C` gems, `+0x28` and `+0x30` timer values (from the HUD draw `func_80242270`).
 
@@ -283,7 +283,7 @@ The default `BM64_HASH_RANGES` list. With it, two replays of the same recording 
 | `game` | `0x802AC400`–`0x802AD120`, `0x802AFC20`–`0x802B36D0` | `0x802AD120`–`0x802AFC20` audio globals, queues, audio thread + stack |
 | `heap` | `0x802B36D0`–`0x80400000` | nothing |
 
-- **Dead process stacks** are skipped in every range: memory below each suspended process's MIPS `sp`, and whole inline stacks that no live process uses. The live `sp` comes from the coroutine slot (`bm64::debug::get_process_stacks` in `process_coroutines.cpp`). Under the o32 ABI nothing valid lives below `sp`, but stale slots there hold audio-heap pointers that differ between runs. `BM64_HASH_DEAD_STACKS=1` hashes them anyway.
+- **Dead process stacks** are skipped in every range: memory below each suspended process's MIPS `sp`, the 16-byte o32 argument home at `sp`, and whole inline stacks that no live process uses. The live `sp` comes from the coroutine slot (`bm64::debug::get_process_stacks` in `process_coroutines.cpp`). Under the o32 ABI nothing the caller keeps lives below `sp + 0x10`. A callee may spill `a0`–`a3` into those 16 bytes, and a yield inside that call leaves audio-heap pointers and other scratch there. `new.bm64rec` SyncTest used to fail at tick 8448 on exactly that word: process 11 (`func_8023F26C`, suspended in `HuPrcSleep`) had `0` at `sp` on one pass and `0xB` on the other, with audio-heap pointers in the slots just below `sp`. The rest of the frame matched. `BM64_HASH_DEAD_STACKS=1` hashes the scratch anyway.
 - **Snapshot, beyond the hash** (`src/game/bm64_state.cpp`): the hash ranges above, the file-loader lock `0x8029F580`–`0x8029F5E4` (the word just before `gFrontBufferID`; leaving the first pass's value makes the reload allocate from a different free-list bin), and the sound slot table `0x800BD770`–`0x800BD818`. The post-BSS gap, `gGfxWork`, and the RSP/audio heap are not copied. Restoring audio globals `0x802AD120`–`0x802AFC20` without that heap sends the audio microcode to a bad jump target.
 - **Still not hashed**: patch globals in `0x80801000+` (the boot timer, scroll-pending flag and restored overlay id are saved next to RDRAM instead). Freed malloc blocks are hashed as-is.
 
@@ -328,7 +328,7 @@ Host side: `src/game/bm64_debug.cpp` (`include/bm64_debug.h`). Overlay UI: `src/
   - `BM64_DEBUG_OVERLAY=1` shows the debug overlay from startup (`tools/run-replay.ps1 -Overlay`).
   - `BM64_AUTOSTART=1` skips the launcher (`recompui::try_autostart_game`, called from the UI draw hook) if the ROM is valid.
   - `BM64_EXIT_ON_REPLAY_END=1` quits on the tick after the replay runs out of input; `BM64_EXIT_TICK=<n>` quits at tick n. Both close the hash log first.
-- **Default hash ranges**: `ovl`, `bss`, `files`, `data`, `gfx`, `prc`, `game`, `heap`, `slots`, with OS, render-thread and audio objects and dead stacks left out. `slots` is the player array at `0x80F00000`. See "State hash ranges" in section 11.
+- **Default hash ranges**: `ovl`, `bss`, `files`, `data`, `gfx`, `prc`, `game`, `heap`, `slots`, with OS, render-thread and audio objects and dead stacks left out. `slots` is `0x80F00000`–`0x80F00780`: eight player slots, `g_ComputerPlayerMovement`, and the `func_80241BB0` side table. See "State hash ranges" in section 11.
 - **Unattended replays**: `tools/run-replay.ps1 -Replay <file> -Out <dir> [-DumpTicks 0,1702] [-Ranges legacy|<spec>] [-TimeoutSec 600]` sets autostart, exit-on-replay-end, hash log and dumps, and kills the game if it is still running after the timeout. It writes `<dir>/hashes.csv`, `stdout.txt` and `dumps/`. A 9,591-tick replay takes about 165 s.
 - **Diagnosing a mismatch**: run two replays with `-DumpTicks` at the first differing tick from `compare_hashes.py`, then `dumpdiff.py`. To localise intermittent mismatches without guessing dump ticks, pass a `-Ranges` spec that splits one range into 4 KB columns.
 - **Recording format** (little-endian): `"BM64INP\0"`, u32 version (1), u32 seed, u32 save_size, the save file bytes, then one 24-byte frame per `func_8023A104` call (4 × `{u16 button; s8 stick_x; s8 stick_y; u8 errno; u8 reserved}`). The boot-time read from `func_8023A22C` is the first frame. When a replay runs out, input goes live again and the overlay shows "REPLAY ENDED".
@@ -352,6 +352,5 @@ Host side: `src/game/bm64_debug.cpp` (`include/bm64_debug.h`). Overlay UI: `src/
 - Which overlay functions are enemy processes, and how a process maps to its object (`Process.user_data`?).
 - Contents of `0x800BEA60`–`0x80100000` and `0x8019B0D0`–`0x8019C2E0`, `0x801E56C0`–`0x80225800`. (The audio heap is `0x8019C2E0`–`0x801E56C0`.) SyncTest did not need them in the snapshot; they are still not mapped symbol by symbol.
 - Mutability of the camera tables at `0x8029FEA0`–`0x802A004C`.
-- Which per-player companion arrays besides `g_ComputerPlayerMovement` must grow with the player array.
 - World and boss identity of each map overlay (confirm by loading each map).
 - Do the overlay words that store a sound handle (section 10) ever get used as an index into gameplay data, or only passed back to the sound allocator?
