@@ -475,7 +475,21 @@ namespace {
             lines.emplace_back(net);
         }
 
-        for (uint32_t i = 0; i < 5; i++) {
+        if (bm64::coop::active()) {
+            int me = bm64::coop::local_player();
+            if (me < 0 || me >= bm64::coop::kPlayerSlots) {
+                me = 0;
+            }
+            uint32_t mine = g_players + static_cast<uint32_t>(me) * player_stride;
+            snprintf(buf, sizeof(buf), "you P%d   hearts %d   bombs %d   fire %d   lives %d   gems %d",
+                me, (int)read_u32(rdram, mine + 0x14), (int)read_u32(rdram, mine + 0x1C),
+                (int)read_u32(rdram, mine + 0x20), (int)read_u32(rdram, 0x802AC624),
+                (int)read_u32(rdram, 0x802AC610 + 0x1C));
+            lines.emplace_back(buf);
+        }
+
+        uint32_t shown = bm64::coop::active() ? static_cast<uint32_t>(bm64::coop::kPlayerSlots) : 5;
+        for (uint32_t i = 0; i < shown; i++) {
             uint32_t p = g_players + i * player_stride;
             uint32_t bomb_type = read_u32(rdram, p + 0x18) & 0xFFFF;
             std::string pos = "-";
@@ -534,6 +548,12 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
         }
         std::memcpy(rdram + (bm64::coop::kHudBase - 0x80000000u),
             rdram + (bm64::coop::kHudOld - 0x80000000u), bm64::coop::kHudCopy);
+        for (uint32_t i = 0; i < bm64::coop::kProcessSlots; i++) {
+            rdram[(bm64::coop::kStickyBase - 0x80000000u) + i * 2] = 0xFF;
+        }
+        for (int c = 0; c < bm64::coop::kCategories; c++) {
+            rdram[(bm64::coop::kOverrideBase - 0x80000000u) + static_cast<uint32_t>(c)] = 0xFF;
+        }
         std::printf("[bm64 coop] Player array at %08X (%d slots, movement at %08X)\n",
             bm64::coop::kPlayerBase, bm64::coop::kPlayerSlots, bm64::coop::kMoveBase);
     }
@@ -785,6 +805,9 @@ extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
 
+    if (bm64::coop::active()) {
+        set_overlay_shown(true);
+    }
     bool dump = std::find(state.dump_ticks.begin(), state.dump_ticks.end(), state.tick) != state.dump_ticks.end();
     bool update_overlay = overlay_shown && (state.tick % 4) == 0;
     std::vector<Segment> mask;

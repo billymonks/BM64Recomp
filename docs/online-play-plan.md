@@ -280,21 +280,21 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Work: a script in `tools/re` generates `[[patches.instruction]]` entries that repoint every main-code reference to `g_Players` (`0x800AEDF0`–`0x800AF1D8`, about 143 functions) to a larger array in patch RAM (`0x80801000+`). It also widens the 4- and 5-slot loops and relocates per-player companion arrays (`g_ComputerPlayerMovement` and any found during the work). Add a checker that proves no old-range references remain.
   - Done when: SyncTest still passes, and Battle and story are unaffected with 5 slots in use.
   - Note: `tools/re/relocate_players.py` repoints the main-code references (`--check` covers them) and widens the 4- and 5-slot player loops to 8. `g_ComputerPlayerMovement` is at `0x80F00640` (8 × `0x10`). `func_80241BB0`'s side table is at `0x80F006C0`, with its original bytes copied at boot. `func_802506B8` and `func_8024ABA8` still use `D_800AF1D8` as the next table. The 4-port controller map in `func_8023D0F8` stays at 4. The snapshot and the `slots` hash are `0x80F00000`–`0x80F00780`. SyncTest after the widen exited 0: `new.bm64rec` at tick 8838 and `test.bm64rec` at tick 9591. A battle match was not played.
-- [ ] **6.2 Call-site catalogue**
+- [x] **6.2 Call-site catalogue**
   - Depends on: 0.2.
   - Work: classify every `getMainPlayer()` use, every direct `D_802AC894` reader, and every constant-index `getPlayerObj`/`getPlayerPos` call, per overlay. Categories: camera, enemy or boss targeting, trigger or goal, cutscene or script, HUD, rival-bomber control, other. Put the table in `game-internals.md`.
   - Done when: every call site has a category.
-  - Note: partial. Main-code `jal`s to `getMainPlayer`: 2 camera (`func_80235D7C`, `func_80237664`) and 15 not yet split into enemy, trigger, cutscene, or HUD (listed in `game-internals.md`). The 27 direct `D_802AC894` readers are listed there and not categorised one by one. Overlays do not reference the array; they call the accessors. Constant-index `getPlayerObj` counts were already in that doc.
+  - Note: `tools/re/catalogue_main_player.py` assigns all 626 `getMainPlayer`, `D_802AC894`, and constant-index `getPlayerObj`/`getPlayerPos` sites. The rules are in `game-internals.md`. Per-overlay counts are in `docs/main-player-catalogue.txt`. Process entries that are not "other" are in `src/game/bm64_player_cats.inc`.
 - [ ] **6.3 Co-op slots and spawning**
   - Depends on: 6.1.
   - Work: in co-op, mark the co-op players' slots human before `func_80245CDC`. Allocate slots that don't collide with rival bombers in maps 4.10, 5.7, 6.15, 8.13, 9.5 and 9.6. Spawn teammates next to the leader.
   - Done when: 2–4 bombers spawn in every story map.
-  - Note: `bm64_coop_before_stage` runs at the start of `func_80245CDC` when the session has more than one player. It sets `controlType` 1 on empty slots, skipping 1–3 on the six rival maps, and logs when the 8-slot loop cannot fit everyone. Teammates are not moved next to the leader. No story map was entered.
+  - Note: `bm64_coop_before_stage` runs at the start of `func_80245CDC` when the session has more than one player. It sets `controlType` 1 on empty slots, skipping 1–3 on the six rival maps, and copies the leader's spawn position onto each new teammate with a 40-unit step along X. `g_SpawnPlayer` copies those floats onto the bomber. It logs when the 8-slot loop cannot fit everyone. No story map was entered.
 - [ ] **6.4 Main-player virtualization framework**
   - Depends on: 6.2, 6.3.
   - Work: patch `func_80243DDC` and the 27 direct readers to ask a context resolver ("who is the main player for the current process?"), keyed on the current process (`D_802AC344`) and the category from 6.2. The default returns the leader (slot 0). The resolver's state lives in game memory, so it's snapshotted.
   - Done when: single-player behaviour is unchanged, and the resolver can be overridden per category.
-  - Note: `func_80243DDC` returns `bm64_main_player()`, which reads `D_802AC894` while the override is off. The override is not written: a per-peer value would desync the shared camera block. The 27 direct readers still load the word. Single-player replays do not set a session, so they keep the ROM value.
+  - Note: with no session, `bm64_main_player()` returns `D_802AC894`, so single-player replays stay on the hero. In a session the running process is looked up in `bm64_player_cats.inc`. Enemy entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot. The 27 direct readers still load the word.
 - [ ] **6.5 Per-player cameras**
   - Depends on: 6.4.
   - Work:
@@ -309,6 +309,7 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.4.
   - Work: for each targeting process, keep a sticky target player (nearest living player, re-evaluated about once a second, deterministic). Tune per boss as needed.
   - Done when: enemies and bosses engage all players in every world.
+  - Note: while a session is running, `getMainPlayer` from a process whose entry is classified as enemy or boss picks the nearest living human or AI bomber and keeps that slot for 60 ticks. The choice is stored per process at `0x80F00780`. The origin is the process `user_data` object when that pointer has a body, otherwise the leader. Ties take the lowest slot. Not watched in a stage, and not tuned per boss.
 - [ ] **6.7 Triggers and stage clear**
   - Depends on: 6.4.
   - Work: goals, exits, switches and pickups that check the main player should accept any player; the triggering player becomes the leader for the following sequence. One player clearing the stage clears it for everyone.
@@ -330,6 +331,7 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.3.
   - Work: show the local player's hearts, bombs and fire; small teammate indicators; shared lives and gems.
   - Done when: it's readable at 4 players in widescreen.
+  - Note: a session shows the debug overlay on its own. The panel lists the local hearts, bombs and fire, shared lives and gems, and all eight slots. It was not looked at in a window.
 - [ ] **6.12 Rival-bomber maps**
   - Depends on: 6.3–6.9.
   - Work: verify maps 4.10, 5.7, 6.15, 8.13, 9.5 and 9.6 with 4 co-op players plus rivals.
@@ -342,7 +344,7 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.5–6.13.
   - Work: one milestone per world (banks 4–9 plus the related boss banks 10–12): complete it with 2, 3 and 4 players and log issues.
   - Done when: each world is completable at all player counts.
-  - Note: 6.6, 6.7, 6.8, 6.10, 6.11, 6.12, 6.13 and these playthroughs were not coded. Targeting, triggers, checkpoints, cutscenes, the HUD, rival-map checks, and save merge are unchanged.
+  - Note: 6.7, 6.8, 6.9's respawn, 6.10, 6.12, 6.13 and these playthroughs were not coded. Triggers, checkpoints, cutscenes, rival-map checks, and save merge are unchanged. The debug overlay, shown automatically during a session, lists the local hearts, bombs, fire, shared lives and gems, and all eight slots. It was not looked at in a window.
 
 ## Phase 7 – Online co-op
 
