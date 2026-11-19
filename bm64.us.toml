@@ -344937,4 +344937,20 @@ text = """
     bm64_camera_broadcast(rdram);
 """
 
+[[patches.hook]]
+func = "func_80248148"
+before_vram = 0x80248284
+text = """
+    extern void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx);
+    bm64_coop_downed(rdram, ctx);
+"""
+
+[[patches.hook]]
+func = "func_802512F8"
+before_vram = 0x80251360
+text = """
+    extern void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx);
+    bm64_coop_snap_party(rdram, ctx);
+"""
+
 # END bm64 main-player readers
