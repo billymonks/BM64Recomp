@@ -5,12 +5,21 @@
 
 // Story co-op. The array the game uses is kPlayerBase (tools/re/relocate_players.py).
 // Inactive unless a net session has more than one player, so replays stay single-player.
-// The spawn loop still visits five slots. Eight are reserved so a later widen has room.
+// Spawn and update loops visit all kPlayerSlots. Empty slots stay controlType 0.
 namespace bm64::coop {
 
 constexpr uint32_t kPlayerBase = 0x80F00000;
 constexpr uint32_t kPlayerStride = 0xC8;
 constexpr int kPlayerSlots = 8;
+// g_ComputerPlayerMovement, 8 x 0x10, immediately after the player array.
+constexpr uint32_t kMoveBase = 0x80F00640;
+constexpr uint32_t kMoveBytes = 0x80;
+// func_80241BB0's side table. The first 0x64 bytes are the original initialized data.
+constexpr uint32_t kHudBase = 0x80F006C0;
+constexpr uint32_t kHudBytes = 0xC0;
+constexpr uint32_t kHudCopy = 0x64;
+constexpr uint32_t kHudOld = 0x802A07D4;
+constexpr uint32_t kStateEnd = kHudBase + kHudBytes;
 
 void set_session(int players, int local_player, bool unlimited_lives);
 void note_overlay(int overlay_id);

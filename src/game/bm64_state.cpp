@@ -72,7 +72,7 @@ std::vector<Segment> segments() {
         { 0x802B36D0, 0x80400000 },
         // Relocated player array. Leaving it out of the snapshot makes rollback
         // keep a dangling object pointer and fault on the next resim.
-        { 0x80F00000, 0x80F00640 },
+        { 0x80F00000, bm64::coop::kStateEnd },
     };
 }
 
