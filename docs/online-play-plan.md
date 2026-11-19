@@ -260,6 +260,7 @@ Code for a loopback lobby is in the build. A Discord application and two PCs are
   - Work: Host and Join buttons, a player list, port assignment, ready state, version and ROM mismatch errors, and input delay settings.
   - Done when: a non-technical user can start an online Battle.
   - Note: the launcher has "Host local game" and "Join local game" (`prepare_loopback`, ports 27015 and 27016). The handshake rejects a protocol or ROM-hash mismatch and waits for every guest ack before the game starts. Player count, delay, and lives are `BM64_NET_PLAYERS`, `BM64_NET_DELAY`, and `BM64_NET_LIVES`. The buttons were not clicked. There is no Discord player list.
+  - Note (2026-11-19): with a ROM selected, the launcher also cycles Players (2–4), Input delay (0–4), and Lives (shared or unlimited). Those values are what the handshake uses when the matching environment variable is unset. The new buttons were not clicked.
 - [ ] **5.5 Custom Bomberman for guests**
   - Depends on: 4.6.
   - Work: costumes come from the save, and the session uses the host's save. Inject each guest's custom bomber parts into the session save image at session start.
@@ -294,7 +295,8 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.2, 6.3.
   - Work: patch `func_80243DDC` and the 27 direct readers to ask a context resolver ("who is the main player for the current process?"), keyed on the current process (`D_802AC344`) and the category from 6.2. The default returns the leader (slot 0). The resolver's state lives in game memory, so it's snapshotted.
   - Done when: single-player behaviour is unchanged, and the resolver can be overridden per category.
-  - Note: with no session, `bm64_main_player()` returns `D_802AC894`, so single-player replays stay on the hero. In a session the running process is looked up in `bm64_player_cats.inc`. Enemy entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot. The 27 direct readers still load the word.
+  - Note: with no session, `bm64_main_player()` returns `D_802AC894`, so single-player replays stay on the hero. In a session the running process is looked up in `bm64_player_cats.inc`. Enemy and trigger entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot.
+  - Note (2026-11-19): the 22 direct `lw`s of `D_802AC894` (every reader except the patched getter) are hooks that store `bm64_resolved_slot` into the register the load just wrote. The three `sw`s and `func_80245868`'s address calculation stay writers. With no session the function returns that word, so the register does not change. `func_80236F54` is treated as a camera process even though it has no catalogue row. After replay started rewriting `0x802AC400` from the ports the file uses, two replays of `test.bm64rec` matched on all 9,591 ticks in every range, and the save was unchanged. A third pass with `BM64_CAMERA_BIAS` still differs in `bss` and `heap`, which is the lookAt matrix and the camera process stack from phase 2.5.
 - [ ] **6.5 Per-player cameras**
   - Depends on: 6.4.
   - Work:
@@ -304,7 +306,7 @@ The player array move is in the binary and the loopback session can run it. Stor
     - Overlay camera commands (`func_80234778`, `func_802346C8`, `func_80234434`, …) apply to every block.
     - Render only the local player's block.
   - Done when: each instance follows its own bomber, and the hashes match across instances.
-  - Note: partial, render only. `func_80227CD0` still updates one camera block. For local player > 0 it shifts the lookAt arguments onto that bomber and does not write the block. Non-rendered steps return before that shift. When the session has more than one player, the hash skips the lookAt outputs (`0x802A5418` and the two `gFrameBuffers` matrices). Per-player camera blocks and C-button ports are not implemented. Not watched on two windows in a stage.
+  - Note (2026-11-19): when a session has two or more human bombers, `func_80235D7C` and the `func_80236D30` call inside `func_80236F54` run once per human. Each human's eye, look-at/mode, controller, `0x8029FEA0` table, and the 16 bytes at `0x802A5A50` live in a block at `0x80F00840` (stride `0x2E0`, inside the snapshot). Live memory is put back to the first human before the process sleeps, so peers hash the same camera. C-buttons at `0x80235974` read that human's port while their block is in. `bm64_camera_frame` then replaces the lookAt arguments with the local human's saved eye and target (mode 1 still swaps them). `func_802346C8` and `func_80234778` copy the live camera onto every block. `func_80251C88`'s object table is still shared. Not watched on two windows in a stage. A session with fewer than two humans does not swap.
 - [ ] **6.6 Enemy and boss targeting**
   - Depends on: 6.4.
   - Work: for each targeting process, keep a sticky target player (nearest living player, re-evaluated about once a second, deterministic). Tune per boss as needed.
@@ -314,6 +316,7 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.4.
   - Work: goals, exits, switches and pickups that check the main player should accept any player; the triggering player becomes the leader for the following sequence. One player clearing the stage clears it for everyone.
   - Done when: every stage can be finished by any player.
+  - Note (2026-11-19): a process whose entry is one of the six trigger functions resolves the main player through the same sticky nearest-living-bomber rule as an enemy. That is the read side of "any player". The goal's own distance test was not rewritten, and the canonical word `D_802AC894` is not changed to the player who touched it. Not watched in a stage.
 - [ ] **6.8 Map transitions and checkpoints**
   - Depends on: 6.7.
   - Work: when any player takes a screen or map transition, the whole party moves and teammates appear at the entry point. Record each entry point as the checkpoint; stage start is the first.

@@ -10,8 +10,28 @@
 #include <filesystem>
 
 static std::string version_string;
+static std::string players_label = "Players: 2";
+static std::string delay_label = "Input delay: 2";
+static std::string lives_label = "Lives: shared";
+static int launch_players = 2;
+static int launch_delay = 2;
+static bool launch_unlimited = false;
+static bool launch_bound = false;
 
 Rml::DataModelHandle model_handle;
+
+static void publish_launch_options() {
+    players_label = "Players: " + std::to_string(launch_players);
+    delay_label = "Input delay: " + std::to_string(launch_delay);
+    lives_label = std::string("Lives: ") + (launch_unlimited ? "unlimited" : "shared");
+    bm64::online::set_launch_options(launch_players, launch_delay, launch_unlimited);
+    if (launch_bound) {
+        model_handle.DirtyVariable("players_label");
+        model_handle.DirtyVariable("delay_label");
+        model_handle.DirtyVariable("lives_label");
+    }
+}
+
 bool mm_rom_valid = false;
 
 extern std::vector<recomp::GameEntry> supported_games;
@@ -98,6 +118,24 @@ public:
                 recompui::hide_all_contexts();
             }
         );
+        recompui::register_event(listener, "cycle_players",
+            [](const std::string&, Rml::Event&) {
+                launch_players = launch_players >= 4 ? 2 : launch_players + 1;
+                publish_launch_options();
+            }
+        );
+        recompui::register_event(listener, "cycle_delay",
+            [](const std::string&, Rml::Event&) {
+                launch_delay = launch_delay >= 4 ? 0 : launch_delay + 1;
+                publish_launch_options();
+            }
+        );
+        recompui::register_event(listener, "cycle_lives",
+            [](const std::string&, Rml::Event&) {
+                launch_unlimited = !launch_unlimited;
+                publish_launch_options();
+            }
+        );
         recompui::register_event(listener, "host_local",
             [](const std::string&, Rml::Event&) {
                 if (!mm_rom_valid) {
@@ -152,8 +190,13 @@ public:
 
         version_string = recomp::get_project_version().to_string();
         constructor.Bind("version_number", &version_string);
+        constructor.Bind("players_label", &players_label);
+        constructor.Bind("delay_label", &delay_label);
+        constructor.Bind("lives_label", &lives_label);
+        publish_launch_options();
 
         model_handle = constructor.GetModelHandle();
+        launch_bound = true;
     }
 };
 

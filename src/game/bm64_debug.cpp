@@ -79,6 +79,9 @@ namespace {
         std::fstream record_file;
         std::vector<uint8_t> replay_frames;
         size_t replay_cursor = 0;
+        // Bit per port. Replay forces the status words at 0x802AC400 from this, because those
+        // words otherwise follow whichever SDL devices this process opened.
+        uint8_t replay_connected = 0x1;
         uint32_t replay_seed = 0;
         uint32_t seed = 0;
 
@@ -399,6 +402,18 @@ namespace {
         state.replay_seed = seed;
         state.replay_frames.assign(data.begin() + cursor, data.end());
         state.replay_cursor = 0;
+        state.replay_connected = 0x1;
+        size_t frames = state.replay_frames.size() / (num_ports * pad_size);
+        for (size_t frame = 0; frame < frames; frame++) {
+            for (uint32_t port = 1; port < num_ports; port++) {
+                const uint8_t* sample = state.replay_frames.data() + (frame * num_ports + port) * pad_size;
+                uint16_t button = 0;
+                std::memcpy(&button, sample, sizeof(button));
+                if (button != 0 || sample[2] != 0 || sample[3] != 0) {
+                    state.replay_connected = static_cast<uint8_t>(state.replay_connected | (1u << port));
+                }
+            }
+        }
         state.input_mode = InputMode::Replay;
         printf("[bm64 debug] Replaying %s: seed %08X, %zu input frames, save sandboxed\n",
             path, seed, state.replay_frames.size() / (num_ports * pad_size));
@@ -706,6 +721,18 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
     }
 
     auto remember = [&]() {
+        // osContGetQuery fills 0x802AC400 from the devices this process opened. A replay has
+        // no record of that, so derive it from which ports the file actually uses.
+        if (state.input_mode == InputMode::Replay) {
+            for (uint32_t port = 0; port < num_ports; port++) {
+                uint8_t* status = rdram + (0x802AC400u - 0x80000000u) + port * 4u;
+                bool present = (state.replay_connected & (1u << port)) != 0;
+                status[0] = 0x00;
+                status[1] = present ? 0x05 : 0x00;
+                status[2] = present ? 0x01 : 0x00;
+                status[3] = present ? 0x00 : 0x08;
+            }
+        }
         for (uint32_t i = 0; i < num_ports * pad_size; i++) {
             state.last_pads[i] = MEM_BU(i, pads);
         }

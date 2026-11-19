@@ -12,6 +12,7 @@
 #include "xxHash/xxhash.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
@@ -250,16 +251,50 @@ bool accepting_sample() {
     return rt().accept;
 }
 
+std::atomic<int> launch_players_{2};
+std::atomic<int> launch_delay_{2};
+std::atomic<int> launch_unlimited_{0};
+
 void prepare_loopback(bool host_side) {
     rt().launch_set = true;
     rt().launch_host = host_side;
+}
+
+void set_launch_options(int players, int delay, bool unlimited_lives) {
+    if (players < 2) {
+        players = 2;
+    }
+    if (players > 4) {
+        players = 4;
+    }
+    if (delay < 0) {
+        delay = 0;
+    }
+    if (delay > 8) {
+        delay = 8;
+    }
+    launch_players_.store(players);
+    launch_delay_.store(delay);
+    launch_unlimited_.store(unlimited_lives ? 1 : 0);
+}
+
+int launch_players() {
+    return launch_players_.load();
+}
+
+int launch_delay() {
+    return launch_delay_.load();
+}
+
+bool launch_unlimited_lives() {
+    return launch_unlimited_.load() != 0;
 }
 
 bool want_unlimited_lives() {
     if (const char* v = std::getenv("BM64_NET_LIVES")) {
         return v[0] != '\0' && std::strcmp(v, "0") != 0;
     }
-    return false;
+    return launch_unlimited_.load() != 0;
 }
 
 void handshake() {
@@ -325,7 +360,7 @@ void handshake() {
         link->loss = std::atoi(loss);
     }
 
-    int players = 2;
+    int players = launch_players_.load();
     if (const char* p = std::getenv("BM64_NET_PLAYERS")) {
         players = std::atoi(p);
     }
@@ -485,7 +520,7 @@ void handshake() {
     bm64::rollback::Config cfg;
     cfg.local_player = player;
     cfg.player_count = players;
-    cfg.input_delay = 2;
+    cfg.input_delay = launch_delay_.load();
     cfg.max_rollback = 8;
     if (const char* d = std::getenv("BM64_NET_DELAY")) {
         cfg.input_delay = std::atoi(d);

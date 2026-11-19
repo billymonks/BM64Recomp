@@ -32,6 +32,7 @@ namespace bm64::session {
     // Added to the eye of the lookAt matrix only. The camera's own state is not written.
     void set_camera_bias(float x, float y, float z);
     bool camera_bias_active();
+    void apply_camera_bias(float& x, float& y, float& z);
 }
 
 // Implemented by the save runtime (see tools/runtime/prepare_sandbox_sources.py).

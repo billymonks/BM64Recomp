@@ -24,8 +24,18 @@ constexpr uint32_t kStickyBase = 0x80F00780;
 constexpr uint32_t kProcessSlots = 0x50;
 constexpr uint32_t kOverrideBase = kStickyBase + kProcessSlots * 2;
 constexpr int kCategories = 8;
-constexpr uint32_t kStateEnd = kOverrideBase + kCategories;
+constexpr int kCatOther = 0;
+constexpr int kCatCamera = 1;
 constexpr int kCatEnemy = 2;
+constexpr int kCatTrigger = 3;
+constexpr int kCatCutscene = 4;
+// Per-player camera pieces. Live memory stays on subjects[0] except while a camera
+// process is updating another player, so peers hash the same block at tick boundaries.
+constexpr uint32_t kCamMeta = kOverrideBase + kCategories;
+constexpr uint32_t kCamBlocks = kCamMeta + 0x18;
+constexpr int kCamCount = 8;
+constexpr uint32_t kCamStride = 0x2E0;
+constexpr uint32_t kStateEnd = kCamBlocks + kCamStride * kCamCount;
 
 int local_player();
 

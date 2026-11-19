@@ -125,6 +125,15 @@ bool bm64::session::camera_bias_active() {
     return bias_on;
 }
 
+void bm64::session::apply_camera_bias(float& x, float& y, float& z) {
+    if (!bias_on) {
+        return;
+    }
+    x += bias_x;
+    y += bias_y;
+    z += bias_z;
+}
+
 extern "C" int bm64_controller_pak_allowed(void) {
     return bm64::session::controller_pak_allowed() ? 1 : 0;
 }

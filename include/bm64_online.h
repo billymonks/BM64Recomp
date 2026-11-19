@@ -9,6 +9,11 @@ namespace bm64::online {
     int player_count();
     // Launcher buttons. Ignored when BM64_NET is already set.
     void prepare_loopback(bool host_side);
+    // Launcher match options. Environment variables win when they are set.
+    void set_launch_options(int players, int delay, bool unlimited_lives);
+    int launch_players();
+    int launch_delay();
+    bool launch_unlimited_lives();
     // Blocks until the host's seed and save image are installed. Called from boot, before EEPROM is read.
     void handshake();
     // Returns 1 when this step should submit a frame. May restore a snapshot first.
