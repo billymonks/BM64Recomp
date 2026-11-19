@@ -6,6 +6,7 @@
 #include "ultra_extensions.h"
 #include "cheats.h"
 #include "bm64_debug.h"
+#include "bm64_state.h"
 
 #define ENABLE_WIDESCREEN_ASPECT_CHANGES
 
@@ -487,6 +488,8 @@ RECOMP_PATCH void load_from_rom_to_addr(void* vAddr, s32 size, u32 devAddr) {
 
     osRecvMesg(&D_8001C418, NULL, 1);
     D_8001C3F8 = 0;
+    // Rollback cannot cross an overlay or file load. The host drops older snapshots and waits for peers.
+    bm64_load_barrier((s32)gOverlayID);
 }
 
 RECOMP_PATCH void func_8000064C(void* vramAddr, u32 size, u32 devAddr) {
@@ -886,8 +889,14 @@ typedef struct Player {
 	int u21;
 } Player;
 
-extern Player g_Players[8]; //0x800AEDF0
+// tools/re/relocate_players.py moves the array to 0x80F00000. Cheats must write that copy.
+#define g_Players ((Player*)0x80F00000)
 extern u32 D_802AC624; // lives
+
+// Same word the ROM getter loads. Co-op can override it per process; the default reads this word.
+RECOMP_PATCH s32 func_80243DDC(void) {
+    return bm64_main_player();
+}
 extern u32 D_802AC628; // credits
 
 RECOMP_EXPORT void Recomp_ProcessCheats() {
@@ -980,14 +989,12 @@ RECOMP_EXPORT void Recomp_ProcessCheats() {
 
 extern void func_8022997C(void);
 
-// Set by Gfx_EndRender when a frame is submitted; the texture scroll for it runs at the start of the next tick.
-static s32 texture_scroll_pending = 0;
+void bm64_wait_gfx(void);
 
 RECOMP_PATCH void func_80225840(void *arg0) {
     void *temp_s0; 
     Gfx *mainGfx;
     s32 id;
-    s32 frameTimer = 8;
     s32 temp_v0;
 
     // Must run before func_80294E54 reads the save.
@@ -1034,9 +1041,22 @@ RECOMP_PATCH void func_80225840(void *arg0) {
     D_802B36AC = free_hook;
 
     while (TRUE) {
+        s32 boot_frame_timer;
+        s32 render;
+        s32 restored_overlay;
+
+        // A restore copies RDRAM the render thread may still be reading.
+        if (bm64_restore_pending()) {
+            bm64_wait_gfx();
+        }
+        render = bm64_step_begin();
+        boot_frame_timer = bm64_boot_timer();
+        restored_overlay = bm64_take_overlay();
+        if (restored_overlay >= 0) {
+            gOverlayID = (enum OverlayIDLoaded)restored_overlay;
+        }
         bm64_debug_tick(gOverlayID);
-        if (texture_scroll_pending) {
-            texture_scroll_pending = 0;
+        if (bm64_take_scroll_pending()) {
             func_8022997C();
         }
         func_8023A104();           // receive message from the cont mesg queue and run osContGetReadData
@@ -1044,8 +1064,12 @@ RECOMP_PATCH void func_80225840(void *arg0) {
             Recomp_ProcessCheats();
         }
         mainGfx = Gfx_InitGfx();   // init gfx
-        ThreadProc_RunQueuedThreads();           // get thread pri/start some kind of thread.
-        func_802381F8();           // yield to that thread.
+        // Resims do not hand the frame to the render thread, and they do not yield to it. A yield here
+        // lets that thread write game memory between the two passes of a save/step/load/step check.
+        if (render) {
+            ThreadProc_RunQueuedThreads();
+            func_802381F8();
+        }
         HuPrcCall();               // run Hudson processes.
         func_8022787C(&mainGfx);   // process frame buffers (4 in the array).
         func_802290CC();           // something related to 3D model animations. stubbing this makes bomberman invisible and all objects "stop" animating.
@@ -1056,27 +1080,33 @@ RECOMP_PATCH void func_80225840(void *arg0) {
         func_8025E1D4(&mainGfx); // soft reset video effect
         func_8026C208();         // does something with audio
         func_8023A208();         // run osContStartReadData
-        Gfx_EndRender(mainGfx);  // do wait/queue/mesg thing?
-
-        // if frame timer is already at 0, ignore the bottom part.
-        if (frameTimer == 0) {
-            continue;
+        if (render) {
+            Gfx_EndRender(mainGfx);
+        } else {
+            // A resim must still apply the game-memory side effects of submitting a frame. Skipping
+            // them leaves D_8029F600 and the blink counter behind a peer that did present the tick.
+            // The display list is not submitted, and the vblank wait would pin the resim to 60 Hz.
+            if (gPauseRender != 0) {
+                D_802A5800 = 0;
+                bm64_set_scroll_pending(1);
+            }
+            D_8029F600++;
         }
 
-        // decrement it. If the decrement resulted in a 0, run the below code, this will result in the below code running once.
-        if (--frameTimer != 0) {
-            continue;
-        }
-
-        // on the 8th frame, run these once. Otherwise, the loop is the above.
+        // The boot viewport setup runs once, on the 8th presented step. Non-rendered resims still count,
+        // and the counter is part of the snapshot so a restore repeats the same schedule.
+        if (boot_frame_timer != 0 && --boot_frame_timer == 0) {
 #ifdef ENABLE_WIDESCREEN_ASPECT_CHANGES
-        func_80227D50(D_802AC5C0, 0, 0, 320, 240);
-        Gfx_SetScreenCoords(0, 0, 320, 240);
+            func_80227D50(D_802AC5C0, 0, 0, 320, 240);
+            Gfx_SetScreenCoords(0, 0, 320, 240);
 #else
-        func_80227D50(D_802AC5C0, 8, 6, 304, 228);
-        Gfx_SetScreenCoords(8, 6, 304, 228);
+            func_80227D50(D_802AC5C0, 8, 6, 304, 228);
+            Gfx_SetScreenCoords(8, 6, 304, 228);
 #endif
-        osViBlack(0);
+            osViBlack(0);
+        }
+        bm64_set_boot_timer(boot_frame_timer);
+        bm64_step_end();
     }
 }
 
@@ -1099,6 +1129,37 @@ OSMesg dl_complete_queue_buf;
 RECOMP_EXPORT void startGfxWait(Gfx *gfx_start) {
     osCreateMesgQueue(&dl_complete_queue, &dl_complete_queue_buf, 1);
     osExQueueDisplaylistEvent(&dl_complete_queue, NULL, gfx_start, OS_EX_DISPLAYLIST_EVENT_PARSED);
+}
+
+static s32 gfx_wait_ready = 0;
+static s32 gfx_wait_pending = 0;
+static OSMesg gfx_wait_buf[8];
+
+// Register the display list that is about to be submitted, and drop completions that already arrived.
+static void bm64_arm_gfx(Gfx* dl) {
+    if (!gfx_wait_ready) {
+        osCreateMesgQueue(&dl_complete_queue, gfx_wait_buf, 8);
+        gfx_wait_ready = 1;
+    }
+    while (gfx_wait_pending >= 8) {
+        osRecvMesg(&dl_complete_queue, NULL, OS_MESG_BLOCK);
+        gfx_wait_pending--;
+    }
+    while (osRecvMesg(&dl_complete_queue, NULL, OS_MESG_NOBLOCK) == 0) {
+        if (gfx_wait_pending > 0) {
+            gfx_wait_pending--;
+        }
+    }
+    osExQueueDisplaylistEvent(&dl_complete_queue, NULL, dl, OS_EX_DISPLAYLIST_EVENT_PARSED);
+    gfx_wait_pending++;
+}
+
+// Block until every display list submitted since the last wait has been parsed.
+void bm64_wait_gfx(void) {
+    while (gfx_wait_pending > 0) {
+        osRecvMesg(&dl_complete_queue, NULL, OS_MESG_BLOCK);
+        gfx_wait_pending--;
+    }
 }
 
 RECOMP_EXPORT void waitForGfxFinish(void) {
@@ -1209,7 +1270,10 @@ RECOMP_PATCH void Gfx_EndRender(Gfx* gfx) {
         // (func_8022997C) are game memory: update them here on the game thread, never from Gfx_Render, so they
         // don't depend on render timing or dropped frames.
         D_802A5800 = 0;
-        texture_scroll_pending = 1;
+        bm64_set_scroll_pending(1);
+        if (D_802A5330.validCount < D_802A5330.msgCount) {
+            bm64_arm_gfx(&gGfxWork[gBackBufferID].main);
+        }
         osSendMesg(&D_802A5330, D_8029F600, 0);
     }
 
@@ -1797,13 +1861,23 @@ static const f32 original_aspect_ratio = (f32)((f32)320/ (f32)240);
 
 // compute floating point matrix from float values for the given FrameBuffer
 RECOMP_PATCH void func_80227CD0(FBInfo *arg0, f32 xEye, f32 yEye, f32 zEye, f32 xAt, f32 yAt, f32 zAt, f32 xUp, f32 yUp, f32 zUp) {
+    // Non-rendered steps still run the camera update. They skip the lookAt write, which is render output.
+    if (bm64_skip_lookat()) {
+        return;
+    }
     // BM64_CAMERA_BIAS adds to these arguments only. The camera block is not written.
     f32 eye[3];
     eye[0] = xEye;
     eye[1] = yEye;
     eye[2] = zEye;
     bm64_camera_bias(eye);
-    func_8029B908(&arg0->mtx, eye[0], eye[1], eye[2], xAt, yAt, zAt, xUp, yUp, zUp); // guLookAt
+    // Co-op shifts the rendered view onto the local bomber. The camera block is not written.
+    f32 at[3];
+    at[0] = xAt;
+    at[1] = yAt;
+    at[2] = zAt;
+    bm64_camera_frame(eye, at);
+    func_8029B908(&arg0->mtx, eye[0], eye[1], eye[2], at[0], at[1], at[2], xUp, yUp, zUp); // guLookAt
     func_8029BB38(&D_802A5418, &arg0->mtx); // guMtxL2F
 
     // then scale the matrix to account for the border.

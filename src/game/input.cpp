@@ -9,6 +9,7 @@
 #include "recomp.h"
 #include "recomp_input.h"
 #include "zelda_config.h"
+#include "zelda_game.h"
 #include "recomp_ui.h"
 #include "bm64_debug.h"
 #include "SDL.h"
@@ -838,9 +839,7 @@ void recomp::poll_inputs() {
         InputState.pending_mouse_delta = { 0.0f, 0.0f };
     }
     
-    // Quicksaving is disabled for now and will likely have more limited functionality
-    // when restored, rather than allowing saving and loading at any point in time.
-    #if 0
+    // Same-session quicksave. Native coroutine stacks are not portable across launches.
     if (InputState.keys) {
         static bool save_was_held = false;
         static bool load_was_held = false;
@@ -853,8 +852,8 @@ void recomp::poll_inputs() {
             zelda64::quicksave_load();
         }
         save_was_held = save_is_held;
+        load_was_held = load_is_held;
     }
-    #endif
 }
 
 void recomp::set_rumble(int controller_num, bool on) {

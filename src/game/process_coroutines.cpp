@@ -2,12 +2,21 @@
 
 #include "recomp.h"
 #include "librecomp/helpers.hpp"
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <cstdint>
 #include <cstdarg>
 #include <array>
 #include <vector>
 #include "bm64_debug.h"
+#include "bm64_state.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 // ============================================================================
 // Configuration
@@ -72,11 +81,19 @@ struct ProcessSlot {
     mco_coro* coro = nullptr;       // Native coroutine handle
     recomp_context ctx;             // MIPS register context for this process
     
-    void reset() {
-        if (coro != nullptr) {
-            mco_destroy(coro);
-            coro = nullptr;
+    void release_coro() {
+        if (coro == nullptr) {
+            return;
         }
+        mco_state coro_state = mco_status(coro);
+        if (coro_state == MCO_SUSPENDED || coro_state == MCO_DEAD) {
+            mco_uninit(coro);
+        }
+        coro = nullptr;
+    }
+
+    void reset() {
+        release_coro();
         state = ProcessState::Free;
         process_id = 0;
         entry_func = 0;
@@ -84,6 +101,65 @@ struct ProcessSlot {
         std::memset(&ctx, 0, sizeof(ctx));
     }
 };
+
+struct SlotBlock {
+    void* mem = nullptr;
+    size_t size = 0;
+    uintptr_t stack_base = 0;
+};
+
+static SlotBlock g_blocks[MAX_PROCESSES];
+static size_t g_block_size = 0;
+static void* g_pool = nullptr;
+static bool g_fixed_base = false;
+static bool g_stack_moved = false;
+
+static void process_coro_entry(mco_coro* co);
+
+static void* pool_alloc(size_t size, void* data) {
+    auto* block = static_cast<SlotBlock*>(data);
+    if (block->mem == nullptr || size > block->size) {
+        return nullptr;
+    }
+    return block->mem;
+}
+
+static void pool_free(void* ptr, size_t size, void* data) {
+    (void)ptr;
+    (void)size;
+    (void)data;
+}
+
+static void ensure_pool() {
+    if (g_pool != nullptr) {
+        return;
+    }
+    mco_desc desc = mco_desc_init(process_coro_entry, MIN_NATIVE_STACK);
+    g_block_size = desc.coro_size;
+    size_t bytes = g_block_size * MAX_PROCESSES;
+#ifdef _WIN32
+    g_pool = VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(0x200000000ull)), bytes,
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    g_fixed_base = g_pool != nullptr;
+    if (g_pool == nullptr) {
+        g_pool = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    }
+#endif
+    if (g_pool == nullptr) {
+        g_pool = std::malloc(bytes);
+        g_fixed_base = false;
+    }
+    if (g_pool == nullptr) {
+        fprintf(stderr, "[Process] FATAL: could not allocate the coroutine stack pool\n");
+        return;
+    }
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        g_blocks[i].mem = static_cast<uint8_t*>(g_pool) + i * g_block_size;
+        g_blocks[i].size = g_block_size;
+    }
+    printf("[Process] Fixed coroutine stacks: %zu slots x %zu bytes at %p%s\n",
+        MAX_PROCESSES, g_block_size, g_pool, g_fixed_base ? " (fixed base)" : "");
+}
 
 // ============================================================================
 // Global state
@@ -196,6 +272,7 @@ extern "C" void recomp_process_init(uint8_t* rdram, recomp_context* ctx) {
     (void)ctx;
     
     process_log("Initializing process system");
+    ensure_pool();
     
     // Reset all slots
     for (auto& slot : g_slots) {
@@ -230,14 +307,10 @@ extern "C" void recomp_process_coro_create(uint8_t* rdram, recomp_context* ctx) 
     ProcessSlot* slot = find_slot_by_id(process_id);
     
     if (slot != nullptr) {
-        // Reuse existing slot - destroy old coroutine first
+        // Reuse existing slot. The native stack stays at this slot's fixed address.
         process_log("Reusing slot for process %u (old state=%d)", 
                     process_id, static_cast<int>(slot->state));
-        
-        if (slot->coro != nullptr) {
-            mco_destroy(slot->coro);
-            slot->coro = nullptr;
-        }
+        slot->release_coro();
     } else {
         // Allocate a new slot
         slot = find_free_slot();
@@ -246,15 +319,20 @@ extern "C" void recomp_process_coro_create(uint8_t* rdram, recomp_context* ctx) 
             return;
         }
     }
-    
-    // Ensure adequate native stack size
-    size_t native_stack = stack_size;
-    if (native_stack < MIN_NATIVE_STACK) {
-        native_stack = MIN_NATIVE_STACK;
+
+    ensure_pool();
+    size_t index = static_cast<size_t>(slot - g_slots.data());
+    if (g_blocks[index].mem == nullptr) {
+        fprintf(stderr, "[Process] ERROR: stack pool is not ready\n");
+        return;
     }
-    
-    // Create the coroutine
-    mco_desc desc = mco_desc_init(process_coro_entry, native_stack);
+    (void)stack_size;
+
+    // Every slot uses the same preallocated stack so its address never changes.
+    mco_desc desc = mco_desc_init(process_coro_entry, MIN_NATIVE_STACK);
+    desc.alloc_cb = pool_alloc;
+    desc.dealloc_cb = pool_free;
+    desc.allocator_data = &g_blocks[index];
     mco_result res = mco_create(&slot->coro, &desc);
     
     if (res != MCO_SUCCESS) {
@@ -270,6 +348,16 @@ extern "C" void recomp_process_coro_create(uint8_t* rdram, recomp_context* ctx) 
     slot->entry_func = entry_func;
     slot->mips_sp = mips_sp;
     std::memset(&slot->ctx, 0, sizeof(slot->ctx));
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(slot->coro->stack_base);
+    if (g_blocks[index].stack_base == 0) {
+        g_blocks[index].stack_base = base;
+    }
+    else if (g_blocks[index].stack_base != base) {
+        g_stack_moved = true;
+        fprintf(stderr, "[Process] Stack moved for slot %zu: %p -> %p\n",
+            index, reinterpret_cast<void*>(g_blocks[index].stack_base), reinterpret_cast<void*>(base));
+    }
     
     process_log("Coroutine created for process %u in slot %zu", 
                 process_id, slot - g_slots.data());
@@ -485,4 +573,161 @@ void bm64::debug::get_process_stacks(std::vector<ProcessStack>& out) {
             out.push_back({ slot.process_id, slot.mips_sp, static_cast<uint32_t>(slot.ctx.r29) });
         }
     }
+}
+
+namespace {
+
+void append_u32(std::vector<uint8_t>& out, uint32_t v) {
+    uint8_t b[4] = { static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v >> 16), static_cast<uint8_t>(v >> 24) };
+    out.insert(out.end(), b, b + 4);
+}
+
+void append_bytes(std::vector<uint8_t>& out, const void* p, size_t n) {
+    const auto* b = static_cast<const uint8_t*>(p);
+    out.insert(out.end(), b, b + n);
+}
+
+struct BlobReader {
+    const uint8_t* p;
+    const uint8_t* end;
+    bool ok = true;
+    uint32_t u32() {
+        if (p + 4 > end) {
+            ok = false;
+            return 0;
+        }
+        uint32_t v = static_cast<uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
+        p += 4;
+        return v;
+    }
+    void bytes(void* dst, size_t n) {
+        if (p + n > end) {
+            ok = false;
+            return;
+        }
+        std::memcpy(dst, p, n);
+        p += n;
+    }
+};
+
+void* coro_rsp(mco_coro* co) {
+    void* rsp = nullptr;
+    if (co == nullptr || co->context == nullptr) {
+        return nullptr;
+    }
+    std::memcpy(&rsp, static_cast<uint8_t*>(co->context) + sizeof(void*), sizeof(rsp));
+    return rsp;
+}
+
+void fix_float_odd(recomp_context& ctx) {
+    if (ctx.mips3_float_mode) {
+        ctx.f_odd = &ctx.f1.u32l;
+    }
+    else {
+        ctx.f_odd = &ctx.f0.u32h;
+    }
+}
+
+} // namespace
+
+bool bm64::proc::stacks_moved() {
+    return g_stack_moved;
+}
+
+bool bm64::proc::save(std::vector<uint8_t>& out) {
+    if (g_current_slot != nullptr) {
+        fprintf(stderr, "[Process] Refusing to save while a coroutine is running\n");
+        return false;
+    }
+    out.clear();
+    append_u32(out, 0x434F5250u);
+    append_u32(out, 1);
+    append_u32(out, static_cast<uint32_t>(MAX_PROCESSES));
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        const ProcessSlot& slot = g_slots[i];
+        out.push_back(static_cast<uint8_t>(slot.state));
+        append_u32(out, slot.process_id);
+        append_u32(out, slot.entry_func);
+        append_u32(out, slot.mips_sp);
+        append_bytes(out, &slot.ctx, sizeof(slot.ctx));
+        bool has = slot.coro != nullptr;
+        out.push_back(has ? 1 : 0);
+        if (!has) {
+            continue;
+        }
+        auto* base = static_cast<uint8_t*>(slot.coro->stack_base);
+        auto* start = reinterpret_cast<uint8_t*>(slot.coro);
+        if (base < start) {
+            fprintf(stderr, "[Process] Coroutine %zu has a stack below its header\n", i);
+            return false;
+        }
+        uint32_t prefix = static_cast<uint32_t>(base - start);
+        append_u32(out, prefix);
+        append_bytes(out, start, prefix);
+        auto* rsp = static_cast<uint8_t*>(coro_rsp(slot.coro));
+        auto* top = base + slot.coro->stack_size;
+        uint32_t used = 0;
+        if (rsp != nullptr && rsp >= base && rsp <= top) {
+            used = static_cast<uint32_t>(top - rsp);
+        }
+        append_u32(out, used);
+        if (used > 0) {
+            append_bytes(out, rsp, used);
+        }
+    }
+    return true;
+}
+
+bool bm64::proc::load(const uint8_t* data, size_t size) {
+    if (g_current_slot != nullptr) {
+        fprintf(stderr, "[Process] Refusing to load while a coroutine is running\n");
+        return false;
+    }
+    ensure_pool();
+    BlobReader r{ data, data + size, true };
+    if (r.u32() != 0x434F5250u || r.u32() != 1 || r.u32() != MAX_PROCESSES) {
+        fprintf(stderr, "[Process] Coroutine snapshot header rejected\n");
+        return false;
+    }
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        ProcessSlot& slot = g_slots[i];
+        uint8_t state_byte = 0;
+        r.bytes(&state_byte, 1);
+        slot.state = static_cast<ProcessState>(state_byte);
+        slot.process_id = r.u32();
+        slot.entry_func = r.u32();
+        slot.mips_sp = r.u32();
+        r.bytes(&slot.ctx, sizeof(slot.ctx));
+        fix_float_odd(slot.ctx);
+        uint8_t has = 0;
+        r.bytes(&has, 1);
+        if (!r.ok) {
+            return false;
+        }
+        if (!has) {
+            slot.coro = nullptr;
+            continue;
+        }
+        uint32_t prefix = r.u32();
+        auto* block = static_cast<uint8_t*>(g_blocks[i].mem);
+        if (block == nullptr || prefix > g_blocks[i].size) {
+            return false;
+        }
+        r.bytes(block, prefix);
+        uint32_t used = r.u32();
+        auto* restored = reinterpret_cast<mco_coro*>(block);
+        auto* base = static_cast<uint8_t*>(restored->stack_base);
+        auto* top = base + restored->stack_size;
+        if (used > 0) {
+            if (base == nullptr || used > restored->stack_size) {
+                return false;
+            }
+            r.bytes(top - used, used);
+        }
+        slot.coro = restored;
+        if (!r.ok) {
+            return false;
+        }
+    }
+    return r.ok;
 }

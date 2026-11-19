@@ -16,6 +16,7 @@ SECTIONS {
     .rodata        : { *(.rodata*)                               } >extram AT >rom
     .data          : { *(.data*)                                 } >extram AT >rom
     .bss  (NOLOAD) : { *(.bss*)  *(COMMON)                       } >extram
+    ASSERT(. < 0x80F00000, "patch image grew into the relocated player array")
     ASSERT(. <= PATCH_RAM_END, "Maxed out recomp extra ram")
     
     .reloc 0 : { *(.reloc*) }

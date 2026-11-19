@@ -2,6 +2,7 @@
 #include "zelda_config.h"
 #include "zelda_support.h"
 #include "bm64_debug.h"
+#include "bm64_online.h"
 #include "librecomp/game.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "RmlUi/Core.h"
@@ -93,6 +94,26 @@ public:
         );
         recompui::register_event(listener, "start_game",
             [](const std::string& param, Rml::Event& event) {
+                recomp::start_game(supported_games[0].game_id);
+                recompui::hide_all_contexts();
+            }
+        );
+        recompui::register_event(listener, "host_local",
+            [](const std::string&, Rml::Event&) {
+                if (!mm_rom_valid) {
+                    return;
+                }
+                bm64::online::prepare_loopback(true);
+                recomp::start_game(supported_games[0].game_id);
+                recompui::hide_all_contexts();
+            }
+        );
+        recompui::register_event(listener, "join_local",
+            [](const std::string&, Rml::Event&) {
+                if (!mm_rom_valid) {
+                    return;
+                }
+                bm64::online::prepare_loopback(false);
                 recomp::start_game(supported_games[0].game_id);
                 recompui::hide_all_contexts();
             }

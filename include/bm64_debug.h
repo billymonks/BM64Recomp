@@ -2,6 +2,7 @@
 #define __BM64_DEBUG_H__
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,24 @@ namespace bm64::debug {
         uint32_t sp;
     };
     void get_process_stacks(std::vector<ProcessStack>& out);
+
+    struct InputCursor {
+        uint64_t input_frame = 0;
+        uint64_t replay_cursor = 0;
+        uint32_t mode = 0;
+    };
+    InputCursor input_cursor();
+    void set_input_cursor(const InputCursor& cursor);
+    // One-shot: the next controller sample is replaced with these 24 bytes.
+    void set_pad_reuse(const uint8_t pads[24]);
+    void copy_pads(uint8_t out[24]);
+    uint64_t tick();
+    void set_tick(uint64_t tick);
+    uint64_t hash_state(uint8_t* rdram);
+    void range_hashes(uint8_t* rdram, std::vector<std::string>& names, std::vector<uint64_t>& hashes);
+    void set_quiet_log(bool quiet);
+    bool booted();
+    void dump_to(uint8_t* rdram, const std::filesystem::path& path);
 }
 
 #endif

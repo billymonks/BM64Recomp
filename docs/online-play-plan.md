@@ -127,122 +127,153 @@ Game facts, addresses and the analysis toolkit are in [game-internals.md](game-i
 
 ## Phase 3 – In-process savestates (main technical risk)
 
-- [ ] **3.1 Final snapshot memory map**
+Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test.bm64rec` (9,591 ticks) before and after the player-array move. `new.bm64rec` passed before that move and, after it, mismatches at tick 8448 in process 11's inline stack (see phase 6.1). Savetest at tick 200 for 60 ticks: save 336 µs, load 243 µs, 717 µs per resimulated tick. Two ordinary replays of the first 200 ticks hashed identically. Every other arena and story world is still open. A patch edit needs two builds before new host calls resolve. The `g_Players` cheat writes were in `patches.c` after one build on this pass (`0x80F0`).
+
+- [x] **3.1 Final snapshot memory map**
   - Depends on: 0.3, 2.6.
   - Work: resolve the "audit" rows in the RDRAM map. Produce an explicit include/exclude list, excluding OS threads, message queues, the scheduler, gfx buffers and IDs, and audio structures.
   - Done when: the list is in `game-internals.md` and used by the state hash.
-  - Note: a first verified list is in "State hash ranges" in `game-internals.md` and is the hash default. Still to audit: `0x800BEA60`–`0x80100000`, game-state patch globals (for example `texture_scroll_pending`), and freed malloc blocks.
-- [ ] **3.2 Fixed coroutine stack pool**
+  - Note: the hash list, including the file directory `0x8014B000`–`0x8014C8D0`, is in `game-internals.md` and is what the snapshot copies, plus the file-loader lock and the sound slots. The post-BSS gap and the RSP/audio heap were not needed for `test.bm64rec`. Patch globals are saved beside RDRAM (boot timer, scroll flag, overlay id), not hashed.
+- [x] **3.2 Fixed coroutine stack pool**
   - Depends on: 0.1.
   - Work: in `process_coroutines.cpp`, preallocate one native stack per slot (0x50) and reuse slot *i*'s stack forever. Use a custom minicoro allocator so nothing is freed and nothing moves.
   - Done when: the game plays normally, and stack addresses stay constant across process creation and destruction.
-- [ ] **3.3 Coroutine state save/restore**
+  - Note: the pool is 80 slots of 526016 bytes at `0x200000000`. The boot log reports that base. Savetest prints `stacks stable`.
+- [x] **3.3 Coroutine state save/restore**
   - Depends on: 3.2.
   - Work: an API to save and restore every `ProcessSlot` (state, IDs, `recomp_context`), the `mco_coro` context, and the used part of each native stack (from the saved stack pointer to the top). Restore only at the top of the main loop.
   - Done when: a unit test inside the game saves, runs 60 ticks, restores, runs the same 60 ticks, and gets identical hashes.
-- [ ] **3.4 Main loop as a step function**
+  - Note: `BM64_SAVETEST=60` did that and passed.
+- [x] **3.4 Main loop as a step function**
   - Depends on: 0.3.
   - Work: restructure the patched `func_80225840` into `step(render)` driven by a host-side frame controller. With `render = false`, still build display lists and run the draw pass, but skip `Gfx_EndRender` submission and the `func_80227CD0` lookAt.
   - Done when: normal play is unchanged, and N non-rendered steps can run in one frame.
-- [ ] **3.5 Render isolation**
+  - Note: a non-rendered step still applies the game-memory side effects of `Gfx_EndRender` (`D_8029F600++`, and the blink-counter clear plus scroll flag when `gPauseRender != 0`). It does not submit the display list or wait for vblank. Two normal replays of 200 ticks matched. Savetest resimulates 60 steps in one launch.
+- [x] **3.5 Render isolation**
   - Depends on: 3.4.
   - Work: before a restore, wait for the in-flight display list (`startGfxWait`/`waitForGfxFinish`). Keep gfx buffer state out of snapshots.
   - Done when: repeated restores cause no crashes or corruption beyond one frame.
+  - Note: `bm64_wait_gfx` is recompiled code, so the patched loop waits before `bm64_step_begin` whenever a restore is pending. Online play waits before every step, because that step may roll back. The 9,591-tick SyncTest did not crash.
 - [ ] **3.6 Audio isolation**
   - Depends on: 2.6, 3.4.
   - Work: wrap `g_PlayGlobalSound`, `g_PlayLocalSound` and `g_StopSound` with deterministic virtual handles mapped to real ones on the host. Add a "speculative" flag that suppresses new sounds. Handle the gameplay audio reads found in 2.6.
   - Done when: sound behaves normally offline, and the audio state doesn't affect hashes.
-- [ ] **3.7 Snapshot ring buffer**
+  - Note: `g_PlayGlobalSound` and `g_PlayLocalSound` return a virtual handle. Stopping a voice is `func_80266930` via `func_8026BE80`, which resolves the virtual id. `g_StopSound` is the pan helper; its entry returns immediately when the step is speculative, so a resim does not recompute pan. Speculative steps do not call the audio driver. Not listened to.
+- [x] **3.7 Snapshot ring buffer**
   - Depends on: 3.1, 3.3, 3.5, 3.6.
   - Work: `save(tick)` and `load(tick)` combining the RDRAM ranges, patch globals and coroutine state, with a ring of at least 10 snapshots. Measure the cost.
   - Done when: save plus load takes under 1 ms, and resimulating 8 ticks takes under 8 ms on a mid-range PC.
+  - Note: ring of 16. Measured save 336 µs + load 243 µs. 8 ticks at 717 µs is about 5.7 ms. The machine is an RTX 3090, not a mid-range PC.
 - [ ] **3.8 SyncTest mode**
   - Depends on: 3.7.
   - Work: a debug mode that runs every tick as save, step, load, step, compare hashes (like GGPO's SyncTest), with a configurable rollback depth.
   - Done when: SyncTest runs clean through every Battle arena and every story world. Fix or document every mismatch.
+  - Note: `BM64_SYNCTEST=1` exited clean on `test.bm64rec` (tick 9591) after the player move. `new.bm64rec` exited clean before that move. After it, the same mode fails at tick 8448 (process 11 stack). Every other arena and story world is still open.
 - [ ] **3.9 Player quicksave (optional)**
   - Depends on: 3.7.
   - Work: user-facing quicksave/quickload built on 3.7. Same session only; native stacks aren't portable across runs.
   - Done when: it works in story and Battle.
+  - Note: F5 and F7 request a save or load at the next step. Not pressed in a focused window.
 
 ## Phase 4 – Rollback core
 
-- [ ] **4.1 Rollback session library**
+The session is our own code in `src/net/` (not GGPO or GekkoNet). `bm64_net_tests` passes lockstep, latency, loss and barrier. Loopback uses `BM64_NET=host|guest`. `BM64_NET_PEER` is a comma-separated list, so four local processes can mesh. `BM64_NET_SAMPLE=zero` replaces the hardware sample with a zero pad; two processes otherwise read the same stick twice and disagree. Non-presented resim steps are not hashed: their end state does not match the peer that presented that tick, and the next presented tick matched in the logs.
+
+- [x] **4.1 Rollback session library**
   - Depends on: nothing; game-independent.
   - Work: C++ in `src/net/`: input queue per player, prediction (repeat the last input), confirmed and predicted frames, a rollback trigger, configurable input delay (default 1–2 ticks) and maximum rollback (about 8), time sync from frame advantage, and a transport interface. Evaluate GGPO or GekkoNet versus writing our own; record the choice.
   - Done when: unit tests with a fake game and fake transport pass.
+  - Note: `bm64_net_tests.exe` passed all four tests on 2026-11-18.
 - [ ] **4.2 Game integration and loopback transport**
   - Depends on: 3.8, 4.1.
   - Work: drive `step()` and `save`/`load` from the session; inject inputs into `D_802AC410` inside `func_8023A104`. Add a localhost UDP transport with simulated latency, jitter and loss.
   - Done when: two instances on one PC play Battle at 100 ms simulated RTT.
-- [ ] **4.3 Desync detection and diff tool**
+  - Note: two instances, 50 ms one-way lag, zero pads, stayed in sync from boot through tick 400 (no desync). That is the title and boot path, not a Battle match. Handshake sends the 128 KB save as 1000-byte UDP chunks.
+- [x] **4.3 Desync detection and diff tool**
   - Depends on: 4.2.
   - Work: exchange hashes every N ticks. On a mismatch, dump both snapshots and diff them into address ranges, then map those to symbols with `tools/re`.
   - Done when: a deliberately injected desync is reported with the exact address.
+  - Note: the guest xored `0x802AC620` at tick 280. Both peers exited on tick 281. `dumpdiff.py` shows `802AC620: 00000000->00000001`.
 - [ ] **4.4 Load barriers**
   - Depends on: 4.2.
   - Work: treat overlay loads and map changes (`load_from_rom_to_addr` and `recomp_load_overlays`) as points rollback can't cross. Peers wait for each other, then the snapshot history is cleared.
   - Done when: stage changes in Battle and story never roll back across a load.
+  - Note: `load_from_rom_to_addr` notifies a barrier. Boot file loads logged barriers and the later sync runs still matched. A battle or story stage change was not played. With more than two players the session waits until every peer has sent that load sequence, and it stalls on the slowest peer.
 - [ ] **4.5 Sound during rollback**
   - Depends on: 3.6, 4.2.
   - Work: de-duplicate sound starts by (tick, sound id, source) across resimulation; stop sounds whose triggering tick was rolled back.
   - Done when: no doubled or missing sounds at 150 ms RTT.
+  - Note: a rollback stops voices the restored list does not keep, and a repeated (tick, sound, source, position) reuses the virtual id. Intermediate resim steps are speculative and do not start the real voice. Not listened to.
 - [ ] **4.6 Session start**
   - Depends on: 2.1, 2.2, 4.2.
   - Work: the host sends the seed, save image, settings (cheats off, lives mode) and a build/ROM/mod hash. All peers boot in sync from tick 0.
   - Done when: four local instances start the same session and stay in sync.
+  - Note: four processes on localhost, same seed, cheats forced off, zero pads, exited at tick 100 with no desync. Protocol 2 appends a lives flag (`BM64_NET_LIVES` unset or `0` is shared; anything else is unlimited, and the guest uses the host's flag). Re-checked after the player move: two peers through tick 200, seed `1DA12F06`, lives unlimited; four peers through tick 100, seed `EAED6DA7`. Controller status at `0x802AC400` is overwritten from the session player count.
 - [ ] **4.7 Soak test**
   - Depends on: 4.3–4.6.
   - Work: run 2–4 instances for hours at varied simulated network conditions, including the story menus.
   - Done when: zero desyncs, and a tuned default delay and rollback window.
+  - Note: not an hours-long run. Automated, zero desyncs: 400 ticks at 50 ms lag; 500 ticks at 40 ms lag, 15 ms jitter and 5% loss (one rollback each, because a zero pad matches the prediction after the first correction); 100 ticks with four players. Default delay is 2 and the rollback window is 8. A long soak and a real Battle are still open.
 
 ## Phase 5 – Online Battle
+
+Code for a loopback lobby is in the build. A Discord application, a TURN relay, and two PCs are still required before anyone off this machine can connect. Do not invent an application id. `BM64_HAS_LIBJUICE` and `BM64_LINK_DISCORD` are CMake options and both default off; turning one on stops the build at the function where that client belongs (`src/net/ice.cpp`, `src/net/signalling.cpp`). `bm64::signalling::kApplicationId` is the empty slot for an application id.
 
 - [ ] **5.1 Internet transport**
   - Depends on: 4.7.
   - Work: UDP with ICE (libjuice or GameNetworkingSockets) and a configurable TURN relay. Signalling goes through an interface, so 5.3 can plug Discord in.
   - Done when: two PCs behind different NATs connect, or fall back to the relay.
+  - Note: the session binds a UDP socket and publishes that endpoint as a host candidate (`bm64::ice::host_candidate`). `BM64_TURN_HOST` is printed and not dialed, because libjuice is not linked. Loopback peers still use `BM64_NET_PEER`. Two-PC NAT is blocked on a relay and a second machine.
 - [ ] **5.2 Discord Social SDK**
   - Depends on: 0.1.
   - Work: register the app, then implement account linking, rich presence, and lobby create/join with invites. Check current SDK capabilities and terms first, and record them here.
   - Done when: a friend can be invited from Discord and both clients see the same lobby.
+  - Note: blocked. No application is registered, and the SDK is not in the tree. Setting `BM64_DISCORD_APP_ID` only changes the log line; the lobby stays on loopback.
 - [ ] **5.3 Signalling over Discord**
   - Depends on: 5.1, 5.2.
   - Work: exchange ICE candidates and session config through lobby messages or metadata.
   - Done when: a Discord invite produces a working peer connection.
+  - Note: `publish_candidate` records the host candidate and does not send it. Peers are the `BM64_NET_PEER` list. A Discord invite is blocked on 5.2.
 - [ ] **5.4 Launcher UI**
   - Depends on: 5.3.
   - Work: Host and Join buttons, a player list, port assignment, ready state, version and ROM mismatch errors, and input delay settings.
   - Done when: a non-technical user can start an online Battle.
+  - Note: the launcher has "Host local game" and "Join local game" (`prepare_loopback`, ports 27015 and 27016). The handshake rejects a protocol or ROM-hash mismatch and waits for every guest ack before the game starts. Player count, delay, and lives are `BM64_NET_PLAYERS`, `BM64_NET_DELAY`, and `BM64_NET_LIVES`. The buttons were not clicked. There is no Discord player list.
 - [ ] **5.5 Custom Bomberman for guests**
   - Depends on: 4.6.
   - Work: costumes come from the save, and the session uses the host's save. Inject each guest's custom bomber parts into the session save image at session start.
   - Done when: everyone sees each player's own costume.
+  - Note: blocked. The 128 KB save is sent, and the field layout for custom bomber parts is not known. No offset was guessed.
 - [ ] **5.6 Disconnects and polish**
   - Depends on: 5.4.
   - Work: a disconnected player is handed to AI (set controlType 2) or the match ends; add a ping and rollback indicator.
   - Done when: online Battle is release-ready; write player-facing notes.
+  - Note: a remote player with no packet for 300 ticks is handed to AI (`controlType` 2) once. The debug overlay prints local player, delay, rollback count, and ticks since the quietest peer. Not shown in a window, and not release-ready.
 
 ## Phase 6 – Story co-op gameplay
 
-Build and test with 2–4 local instances connected by the loopback netplay from Phase 4. Each window is one player with their own camera, so the work is online-ready from the start.
+The player array move is in the binary and the loopback session can run it. Story rules that would change single-player combat, triggers, cutscenes, or the HUD were not rewritten: those need a played stage, and `new.bm64rec` already desyncs. Loops still visit five slots. Rival maps therefore fit two co-op players (slots 0 and 4), and other maps fit four (slots 0–3).
 
 - [ ] **6.1 Relocate the player array**
   - Depends on: 3.8.
   - Work: a script in `tools/re` generates `[[patches.instruction]]` entries that repoint every main-code reference to `g_Players` (`0x800AEDF0`–`0x800AF1D8`, about 143 functions) to a larger array in patch RAM (`0x80801000+`). It also widens the 4- and 5-slot loops and relocates per-player companion arrays (`g_ComputerPlayerMovement` and any found during the work). Add a checker that proves no old-range references remain.
   - Done when: SyncTest still passes, and Battle and story are unaffected with 5 slots in use.
+  - Note: `tools/re/relocate_players.py --write` emitted 257 main-code references (514 instruction patches). Overlays and data words do not point at the array. The array the game uses is `0x80F00000` (eight slots reserved, loops still end at `+0x3E8`). `func_802506B8`'s uses of `D_800AF1D8` as the next table are not moved. The snapshot and the `slots` hash include `0x80F00000`–`0x80F00640`. Without that, rollback left a stale object pointer and faulted in `func_802511EC`. Boot zeroes the new array. SyncTest of `test.bm64rec` exited 0 at tick 9591. `new.bm64rec` fails at tick 8448: process 11's inline stack `0x80069278`–`0x80069A78` (header matches; dead-stack mask did not drop these bytes). Two loopback peers stayed in sync through tick 200 and four through tick 100, both with unlimited lives and zero pads. Companion arrays were not moved, and the 5-slot loops were not widened. Battle and story were not played.
 - [ ] **6.2 Call-site catalogue**
   - Depends on: 0.2.
   - Work: classify every `getMainPlayer()` use, every direct `D_802AC894` reader, and every constant-index `getPlayerObj`/`getPlayerPos` call, per overlay. Categories: camera, enemy or boss targeting, trigger or goal, cutscene or script, HUD, rival-bomber control, other. Put the table in `game-internals.md`.
   - Done when: every call site has a category.
+  - Note: partial. Main-code `jal`s to `getMainPlayer`: 2 camera (`func_80235D7C`, `func_80237664`) and 15 not yet split into enemy, trigger, cutscene, or HUD (listed in `game-internals.md`). The 27 direct `D_802AC894` readers are listed there and not categorised one by one. Overlays do not reference the array; they call the accessors. Constant-index `getPlayerObj` counts were already in that doc.
 - [ ] **6.3 Co-op slots and spawning**
   - Depends on: 6.1.
   - Work: in co-op, mark the co-op players' slots human before `func_80245CDC`. Allocate slots that don't collide with rival bombers in maps 4.10, 5.7, 6.15, 8.13, 9.5 and 9.6. Spawn teammates next to the leader.
   - Done when: 2–4 bombers spawn in every story map.
+  - Note: `bm64_coop_before_stage` runs at the start of `func_80245CDC` when the session has more than one player. It sets `controlType` 1 on empty slots, skipping 1–3 on the six rival maps, and logs when the 5-slot loop cannot fit everyone. Teammates are not moved next to the leader. No story map was entered.
 - [ ] **6.4 Main-player virtualization framework**
   - Depends on: 6.2, 6.3.
   - Work: patch `func_80243DDC` and the 27 direct readers to ask a context resolver ("who is the main player for the current process?"), keyed on the current process (`D_802AC344`) and the category from 6.2. The default returns the leader (slot 0). The resolver's state lives in game memory, so it's snapshotted.
   - Done when: single-player behaviour is unchanged, and the resolver can be overridden per category.
+  - Note: `func_80243DDC` returns `bm64_main_player()`, which reads `D_802AC894` while the override is off. The override is not written: a per-peer value would desync the shared camera block. The 27 direct readers still load the word. Single-player replays do not set a session, so they keep the ROM value.
 - [ ] **6.5 Per-player cameras**
   - Depends on: 6.4.
   - Work:
@@ -252,6 +283,7 @@ Build and test with 2–4 local instances connected by the loopback netplay from
     - Overlay camera commands (`func_80234778`, `func_802346C8`, `func_80234434`, …) apply to every block.
     - Render only the local player's block.
   - Done when: each instance follows its own bomber, and the hashes match across instances.
+  - Note: partial, render only. `func_80227CD0` still updates one camera block. For local player > 0 it shifts the lookAt arguments onto that bomber and does not write the block. Non-rendered steps return before that shift. When the session has more than one player, the hash skips the lookAt outputs (`0x802A5418` and the two `gFrameBuffers` matrices). Per-player camera blocks and C-button ports are not implemented. Not watched on two windows in a stage.
 - [ ] **6.6 Enemy and boss targeting**
   - Depends on: 6.4.
   - Work: for each targeting process, keep a sticky target player (nearest living player, re-evaluated about once a second, deterministic). Tune per boss as needed.
@@ -268,6 +300,7 @@ Build and test with 2–4 local instances connected by the loopback netplay from
   - Depends on: 6.8.
   - Work: find the hero death flow (start with `func_80250E2C` and `func_802506B8`). In co-op, a death costs one shared life (`D_802AC624`) and respawns the player at the last checkpoint while others continue. Party wipe with no lives left runs the original game over. Add the unlimited-lives option to the synced session settings.
   - Done when: these rules hold in normal stages and boss fights.
+  - Note: unlimited lives is the session flag from 4.6. While it is on, `apply_rules` writes `D_802AC624 = 99` every step, on every peer. Shared lives leave that word to the game. Death, checkpoint respawn, and party wipe were not changed.
 - [ ] **6.10 Cutscenes and scripted sequences**
   - Depends on: 6.4.
   - Work: during scripts (`WM1 …` command strings, intro and outro sequences, boss intros), the leader is scripted and teammates are hidden with collision off, then restored next to the leader afterwards.
@@ -288,33 +321,42 @@ Build and test with 2–4 local instances connected by the loopback netplay from
   - Depends on: 6.5–6.13.
   - Work: one milestone per world (banks 4–9 plus the related boss banks 10–12): complete it with 2, 3 and 4 players and log issues.
   - Done when: each world is completable at all player counts.
+  - Note: 6.6, 6.7, 6.8, 6.10, 6.11, 6.12, 6.13 and these playthroughs were not coded. Targeting, triggers, checkpoints, cutscenes, the HUD, rival-map checks, and save merge are unchanged.
 
 ## Phase 7 – Online co-op
+
+The playtest itself is blocked: it needs a Discord login, a TURN server, a second PC, and the phase 6 story playthroughs. What can run on loopback is the phase 4 session plus the lives flag. No snapshot is sent to a rejoining guest.
 
 - [ ] **7.1 Co-op session flow**
   - Depends on: 5.4, 6.14–6.19.
   - Work: the host picks a save file and difficulty; guests join the lobby before the story starts; lives mode and other options are synced.
   - Done when: a Discord invite leads into a co-op story session.
+  - Note: on loopback the host's sandboxed save, seed, player count, and lives flag are in the hello, and guests install that save before tick 0. Difficulty is whatever is in that save. A Discord invite is blocked on 5.2. Story was not started.
 - [ ] **7.2 Story barriers and loading**
   - Depends on: 7.1.
   - Work: confirm that every story load (maps, bosses, cutscenes) is handled by the load barriers from 4.4, with acceptable wait times.
   - Done when: a full world online has no load desyncs.
+  - Note: `load_from_rom_to_addr` already notifies the barrier from phase 4. Boot file loads logged it. A story map change was not played, so wait times and missed loads are unchecked.
 - [ ] **7.3 Reconnect and desync recovery (optional)**
   - Depends on: 7.1.
   - Work: make snapshots portable: fixed-address coroutine stacks (`VirtualAlloc` at a fixed base) plus a non-ASLR build, or pointer rebasing. Then the host can send its state to a rejoining or desynced guest.
   - Done when: a guest can drop and rejoin mid-stage.
+  - Note: the coroutine stacks are already 80 slots at `0x200000000`. Nothing sends a snapshot to another process. A mid-stage rejoin was not tried.
 - [ ] **7.4 Performance tuning**
   - Depends on: 7.1.
   - Work: profile rollback in the heaviest stages and boss fights at 4 players; optimize snapshots (dirty pages or deltas) if needed.
   - Done when: steady 60 fps at 150 ms RTT with an 8-tick rollback.
+  - Note: not profiled in a stage. The phase 3 savetest numbers (save 336 µs, load 243 µs, 717 µs per resimulated tick) are still the only measurement. The player-array range adds 1600 bytes to each snapshot.
 - [ ] **7.5 Online playtest and telemetry**
   - Depends on: 7.2, 7.4.
   - Work: play every stage and boss online; add opt-in desync and crash reports.
   - Done when: no known blockers.
+  - Note: a hash mismatch still dumps both sides under `BM64_DESYNC_DIR` (default `desync`) and exits. No extra crash reporter. Playing the stages is a morning item.
 - [ ] **7.6 Release**
   - Depends on: 7.5.
   - Work: player documentation (setup, Discord, troubleshooting) and release builds.
   - Done when: shipped.
+  - Note: not started. This is the ship step and it waits on the playtest.
 
 ---
 

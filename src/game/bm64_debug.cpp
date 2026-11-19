@@ -20,6 +20,9 @@
 #include "recomp_ui.h"
 #include "bm64_debug.h"
 #include "bm64_session.h"
+#include "bm64_state.h"
+#include "bm64_online.h"
+#include "bm64_coop.h"
 
 namespace {
     constexpr uint32_t num_ports = 4;
@@ -48,12 +51,14 @@ namespace {
         return {
             { "ovl",  { { 0x80043000, 0x80063000 } } },
             { "bss",  { { 0x80063000, 0x800BD770 }, { 0x800BD818, 0x800BE848 } } },
+            { "files", { { 0x8014B000, 0x8014C8D0 } } },
             { "data", { { 0x8029F5E4, 0x8029F608 }, { 0x8029F6D8, 0x802A5300 } } },
             { "gfx",  { { 0x802A5300, 0x802A5330 }, { 0x802A5368, 0x802A5380 }, { 0x802A53BC, 0x802A5550 },
                         { 0x802A5554, 0x802A5A60 } } },
             { "prc",  { { 0x802AB200, 0x802AC3E0 } } },
             { "game", { { 0x802AC400, 0x802AD120 }, { 0x802AFC20, 0x802B36D0 } } },
             { "heap", { { 0x802B36D0, 0x80400000 } } },
+            { "slots", { { 0x80F00000, 0x80F00640 } } },
         };
     }
 
@@ -90,6 +95,10 @@ namespace {
 
         uint64_t tick = 0;
         uint64_t input_frame = 0;
+        bool quiet_log = false;
+        bool pad_reuse = false;
+        uint8_t reuse_pads[24]{};
+        uint8_t last_pads[24]{};
     } state;
 
     // Toggled from the input thread, read by the game thread to decide whether to refresh the overlay text.
@@ -263,6 +272,17 @@ namespace {
     // Feeds [seg.start, seg.end) minus the masked ranges to both hash states.
     void hash_segment(uint8_t* rdram, const Segment& seg, const std::vector<Segment>& mask,
                       XXH3_state_t* range, XXH3_state_t* total) {
+        std::vector<Segment> skips = mask;
+        if (bm64::coop::omit_render_camera()) {
+            // Per-peer lookAt output. The camera block itself stays shared.
+            skips.push_back({ 0x802A5418, 0x802A5418 + 64 });
+            skips.push_back({ 0x800BD5C8, 0x800BD5C8 + 0x40 });
+            skips.push_back({ 0x800BD638, 0x800BD638 + 0x40 });
+            std::sort(skips.begin(), skips.end(), [](const Segment& a, const Segment& b) {
+                return a.start < b.start;
+            });
+        }
+        const std::vector<Segment>& used = skips;
         uint32_t pos = seg.start;
         auto feed = [&](uint32_t from, uint32_t to) {
             if (to > from) {
@@ -270,7 +290,7 @@ namespace {
                 XXH3_64bits_update(total, rdram + (from - 0x80000000u), to - from);
             }
         };
-        for (const Segment& m : mask) {
+        for (const Segment& m : used) {
             if (m.end <= pos || m.start >= seg.end) {
                 continue;
             }
@@ -402,7 +422,7 @@ namespace {
 
     std::vector<std::string> build_overlay_lines(uint8_t* rdram, int32_t overlay_id, uint64_t total,
                                                  const std::vector<uint64_t>& range_hashes) {
-        constexpr uint32_t g_players = 0x800AEDF0;
+        constexpr uint32_t g_players = bm64::coop::kPlayerBase;
         constexpr uint32_t player_stride = 0xC8;
         constexpr uint32_t main_player = 0x802AC894;
         constexpr uint32_t process_count = 0x802AC358;
@@ -439,6 +459,12 @@ namespace {
             read_f32(rdram, camera_eye), read_f32(rdram, camera_eye + 4), read_f32(rdram, camera_eye + 8),
             read_f32(rdram, camera_at), read_f32(rdram, camera_at + 4), read_f32(rdram, camera_at + 8));
         lines.emplace_back(buf);
+
+        char net[160];
+        bm64::online::status_line(net, sizeof(net));
+        if (net[0] != '\0') {
+            lines.emplace_back(net);
+        }
 
         for (uint32_t i = 0; i < 5; i++) {
             uint32_t p = g_players + i * player_stride;
@@ -487,6 +513,14 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
     state.booted = true;
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+
+    if (bm64::coop::kPlayerBase >= 0x80800000u) {
+        std::memset(rdram + (bm64::coop::kPlayerBase - 0x80000000u), 0,
+            bm64::coop::kPlayerStride * static_cast<uint32_t>(bm64::coop::kPlayerSlots));
+        std::printf("[bm64 coop] Player array at %08X (%d slots reserved, spawn loop visits 5)\n",
+            bm64::coop::kPlayerBase, bm64::coop::kPlayerSlots);
+    }
 
     if (const char* ranges = env("BM64_HASH_RANGES")) {
         parse_hash_ranges(ranges);
@@ -571,6 +605,7 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
             setup_recording(record);
         }
     }
+    bm64::online::handshake();
 }
 
 extern "C" void bm64_session_seed(uint8_t* rdram, recomp_context* ctx) {
@@ -613,6 +648,74 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
     gpr pads = ctx->r4;
     state.input_frame++;
 
+    // Controller status sits in the 16 bytes before the pad samples. Each process otherwise
+    // reports whichever SDL devices it managed to open, so peers disagree as soon as a port differs.
+    if (bm64::online::active()) {
+        int players = bm64::online::player_count();
+        for (int port = 0; port < 4; port++) {
+            uint8_t* status = rdram + (0x802AC400u - 0x80000000u) + static_cast<uint32_t>(port) * 4u;
+            if (port < players) {
+                status[0] = 0x00;
+                status[1] = 0x05;
+                status[2] = 0x01;
+                status[3] = 0x00;
+            }
+            else {
+                status[0] = 0x00;
+                status[1] = 0x00;
+                status[2] = 0x00;
+                status[3] = 0x08;
+            }
+        }
+    }
+
+    auto remember = [&]() {
+        for (uint32_t i = 0; i < num_ports * pad_size; i++) {
+            state.last_pads[i] = MEM_BU(i, pads);
+        }
+    };
+    auto write_pads = [&](const uint8_t* bytes) {
+        for (uint32_t i = 0; i < num_ports; i++) {
+            const uint8_t* f = bytes + i * pad_size;
+            uint16_t button;
+            std::memcpy(&button, f, sizeof(button));
+            MEM_H(i * pad_size + 0, pads) = static_cast<int16_t>(button);
+            MEM_B(i * pad_size + 2, pads) = static_cast<int8_t>(f[2]);
+            MEM_B(i * pad_size + 3, pads) = static_cast<int8_t>(f[3]);
+            MEM_B(i * pad_size + 4, pads) = static_cast<int8_t>(f[4]);
+        }
+        remember();
+    };
+
+    if (state.pad_reuse) {
+        state.pad_reuse = false;
+        write_pads(state.reuse_pads);
+        return;
+    }
+
+    uint8_t injected[24];
+    if (bm64_state_consume_inject(injected) || (bm64::online::active() && bm64::online::pads_for_step(injected))) {
+        if (bm64::online::active() && bm64::online::accepting_sample()) {
+            uint8_t local[6];
+            // Two local instances otherwise sample the same physical stick twice and disagree.
+            static int sample_zero = -1;
+            if (sample_zero < 0) {
+                const char* v = std::getenv("BM64_NET_SAMPLE");
+                sample_zero = (v != nullptr && std::strcmp(v, "zero") == 0) ? 1 : 0;
+            }
+            if (sample_zero) {
+                std::memset(local, 0, sizeof(local));
+            } else {
+                for (int b = 0; b < 6; b++) {
+                    local[b] = MEM_BU(b, pads);
+                }
+            }
+            bm64::online::push_local_pad(local);
+        }
+        write_pads(injected);
+        return;
+    }
+
     if (state.input_mode == InputMode::Record) {
         for (uint32_t i = 0; i < num_ports; i++) {
             uint16_t button = static_cast<uint16_t>(MEM_HU(i * pad_size + 0, pads));
@@ -633,6 +736,7 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
         if (state.replay_cursor + num_ports * pad_size > state.replay_frames.size()) {
             state.input_mode = InputMode::ReplayEnded;
             printf("[bm64 debug] Replay ended at input frame %llu; input is live again\n", (unsigned long long)state.input_frame);
+            remember();
             return;
         }
         for (uint32_t i = 0; i < num_ports; i++) {
@@ -646,10 +750,12 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
             state.replay_cursor += pad_size;
         }
     }
+    remember();
 }
 
 extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
     int32_t overlay_id = _arg<0, int32_t>(rdram, ctx);
+    bm64::coop::note_overlay(overlay_id);
 
     if (state.exiting) {
         return;
@@ -690,7 +796,7 @@ extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
         XXH3_freeState(range);
         XXH3_freeState(total);
 
-        if (state.hash_log) {
+        if (state.hash_log && !state.quiet_log) {
             std::fprintf(state.hash_log, "%llu,%llu,%d,%016llX", (unsigned long long)state.tick,
                 (unsigned long long)state.input_frame, overlay_id, (unsigned long long)total_hash);
             for (uint64_t h : range_hashes) {
@@ -708,3 +814,109 @@ extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
 
     state.tick++;
 }
+
+namespace {
+DebugState& dbg() { return state; }
+}
+
+namespace bm64::debug {
+
+InputCursor input_cursor() {
+    InputCursor cursor;
+    cursor.input_frame = dbg().input_frame;
+    cursor.replay_cursor = dbg().replay_cursor;
+    cursor.mode = static_cast<uint32_t>(dbg().input_mode);
+    return cursor;
+}
+
+void set_input_cursor(const InputCursor& cursor) {
+    dbg().input_frame = cursor.input_frame;
+    dbg().replay_cursor = static_cast<size_t>(cursor.replay_cursor);
+    if (cursor.mode <= static_cast<uint32_t>(InputMode::ReplayEnded)) {
+        dbg().input_mode = static_cast<InputMode>(cursor.mode);
+    }
+}
+
+void set_pad_reuse(const uint8_t pads[24]) {
+    std::memcpy(dbg().reuse_pads, pads, sizeof(dbg().reuse_pads));
+    dbg().pad_reuse = true;
+}
+
+void copy_pads(uint8_t out[24]) {
+    std::memcpy(out, dbg().last_pads, 24);
+}
+
+uint64_t tick() {
+    return dbg().tick;
+}
+
+void set_tick(uint64_t tick_value) {
+    dbg().tick = tick_value;
+}
+
+void set_quiet_log(bool quiet) {
+    dbg().quiet_log = quiet;
+}
+
+bool booted() {
+    return dbg().booted;
+}
+
+void range_hashes(uint8_t* rdram, std::vector<std::string>& names, std::vector<uint64_t>& hashes) {
+    names.clear();
+    hashes.clear();
+    std::vector<Segment> mask;
+    if (!dbg().hash_dead_stacks) {
+        mask = dead_stacks(rdram);
+    }
+    XXH3_state_t* range = XXH3_createState();
+    for (const HashRange& r : dbg().ranges) {
+        XXH3_64bits_reset(range);
+        for (const Segment& s : r.segments) {
+            XXH3_state_t* ignored = XXH3_createState();
+            XXH3_64bits_reset(ignored);
+            hash_segment(rdram, s, mask, range, ignored);
+            XXH3_freeState(ignored);
+        }
+        names.push_back(r.name);
+        hashes.push_back(XXH3_64bits_digest(range));
+    }
+    XXH3_freeState(range);
+}
+
+uint64_t hash_state(uint8_t* rdram) {
+    std::vector<Segment> mask;
+    if (!dbg().hash_dead_stacks) {
+        mask = dead_stacks(rdram);
+    }
+    XXH3_state_t* total = XXH3_createState();
+    XXH3_state_t* range = XXH3_createState();
+    XXH3_64bits_reset(total);
+    for (const HashRange& r : dbg().ranges) {
+        XXH3_64bits_reset(range);
+        for (const Segment& s : r.segments) {
+            hash_segment(rdram, s, mask, range, total);
+        }
+    }
+    XXH3_freeState(range);
+    uint64_t total_hash = XXH3_64bits_digest(total);
+    XXH3_freeState(total);
+    return total_hash;
+}
+
+void dump_to(uint8_t* rdram, const std::filesystem::path& path) {
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    std::vector<uint32_t> words((dump_end - dump_start) / 4);
+    std::memcpy(words.data(), rdram + (dump_start - 0x80000000u), words.size() * 4);
+    for (uint32_t& w : words) {
+        w = (w >> 24) | ((w >> 8) & 0xFF00) | ((w << 8) & 0xFF0000) | (w << 24);
+    }
+    std::ofstream out{ path, std::ios::binary };
+    out.write(reinterpret_cast<const char*>(words.data()), static_cast<std::streamsize>(words.size() * 4));
+    std::printf("[bm64 debug] Wrote %s\n", path.string().c_str());
+}
+
+} // namespace bm64::debug

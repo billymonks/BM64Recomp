@@ -5,6 +5,11 @@ if (APPLE)
 endif()
 
 project(BM64Recompiled LANGUAGES C CXX)
+
+# Both stay off. Turning one on does not fetch a library: the matching source file
+# stops the build and names the function where the client belongs.
+option(BM64_HAS_LIBJUICE "Enable the libjuice TURN client (not vendored)" OFF)
+option(BM64_LINK_DISCORD "Link the Discord Social SDK (not vendored)" OFF)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -221,6 +226,12 @@ set (SOURCES
     ${CMAKE_SOURCE_DIR}/src/game/process_coroutines.cpp
     ${CMAKE_SOURCE_DIR}/src/game/bm64_debug.cpp
     ${CMAKE_SOURCE_DIR}/src/game/bm64_session.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/bm64_state.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/bm64_coop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/rollback.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/online.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ice.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/signalling.cpp
 
     ${CMAKE_SOURCE_DIR}/src/ui/ui_renderer.cpp
     ${CMAKE_SOURCE_DIR}/src/ui/ui_state.cpp
@@ -351,7 +362,7 @@ if (WIN32)
     )
 
     target_sources(BM64Recompiled PRIVATE ${CMAKE_SOURCE_DIR}/icons/app.rc)
-    target_link_libraries(BM64Recompiled PRIVATE SDL2 Winmm.lib)
+    target_link_libraries(BM64Recompiled PRIVATE SDL2 Winmm.lib ws2_32.lib)
 endif()
 
 if (APPLE)
@@ -478,6 +489,23 @@ endforeach()
 target_sources(BM64Recompiled PRIVATE ${GENERATED_NRM_SOURCES})
 
 target_sources(BM64Recompiled PRIVATE ${SOURCES})
+if(BM64_HAS_LIBJUICE)
+    target_compile_definitions(BM64Recompiled PRIVATE BM64_HAS_LIBJUICE=1)
+else()
+    target_compile_definitions(BM64Recompiled PRIVATE BM64_HAS_LIBJUICE=0)
+endif()
+if(BM64_LINK_DISCORD)
+    target_compile_definitions(BM64Recompiled PRIVATE BM64_LINK_DISCORD=1)
+else()
+    target_compile_definitions(BM64Recompiled PRIVATE BM64_LINK_DISCORD=0)
+endif()
 bm64_deterministic_fp(BM64Recompiled)
 
 set_property(TARGET BM64Recompiled PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(bm64_net_tests
+    ${CMAKE_SOURCE_DIR}/src/net/rollback.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/rollback_test.cpp
+)
+target_include_directories(bm64_net_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+bm64_deterministic_fp(bm64_net_tests)
