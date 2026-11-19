@@ -10,7 +10,7 @@
 #include "elements/ui_label.h"
 
 namespace {
-    constexpr size_t max_lines = 12;
+    constexpr size_t max_lines = 18;
     constexpr uint64_t draw_report_interval = 600;
 
     struct {

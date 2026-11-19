@@ -19,7 +19,15 @@ constexpr uint32_t kHudBase = 0x80F006C0;
 constexpr uint32_t kHudBytes = 0xC0;
 constexpr uint32_t kHudCopy = 0x64;
 constexpr uint32_t kHudOld = 0x802A07D4;
-constexpr uint32_t kStateEnd = kHudBase + kHudBytes;
+// One sticky target per process slot: int8 player, uint8 generation (tick / 60). Then one int8 override per category.
+constexpr uint32_t kStickyBase = 0x80F00780;
+constexpr uint32_t kProcessSlots = 0x50;
+constexpr uint32_t kOverrideBase = kStickyBase + kProcessSlots * 2;
+constexpr int kCategories = 8;
+constexpr uint32_t kStateEnd = kOverrideBase + kCategories;
+constexpr int kCatEnemy = 2;
+
+int local_player();
 
 void set_session(int players, int local_player, bool unlimited_lives);
 void note_overlay(int overlay_id);
