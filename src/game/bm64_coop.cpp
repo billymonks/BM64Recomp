@@ -196,6 +196,119 @@ int sticky_target(uint8_t* rdram) {
     return pick;
 }
 
+uint8_t* rule(uint8_t* rdram) {
+    return rdram + (bm64::coop::kRuleBase - 0x80000000u);
+}
+
+int32_t* rule_s32(uint8_t* rdram, uint32_t offset) {
+    return reinterpret_cast<int32_t*>(rule(rdram) + offset);
+}
+
+void store_f32(uint8_t* rdram, uint32_t addr, float value) {
+    set_word(rdram, addr, static_cast<int32_t>(std::bit_cast<uint32_t>(value)));
+}
+
+bool slot_body(uint8_t* rdram, int slot, uint32_t& body) {
+    uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride;
+    uint32_t obj = static_cast<uint32_t>(word(rdram, base + 0x28));
+    if ((obj & 0xFF000000u) != 0x80000000u) {
+        return false;
+    }
+    body = static_cast<uint32_t>(word(rdram, obj + 0x40));
+    return (body & 0xFF000000u) == 0x80000000u;
+}
+
+void write_checkpoint(uint8_t* rdram, float x, float y, float z) {
+    uint8_t* rec = rule(rdram);
+    rec[0x28] = 1;
+    store_f32(rdram, bm64::coop::kRuleBase + 0x2C, x);
+    store_f32(rdram, bm64::coop::kRuleBase + 0x30, y);
+    store_f32(rdram, bm64::coop::kRuleBase + 0x34, z);
+    rec[0x29] = 0;
+}
+
+void place_human(uint8_t* rdram, int slot, float x, float y, float z, float angle) {
+    uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride;
+    store_f32(rdram, base + 0x00, x);
+    store_f32(rdram, base + 0x04, y);
+    store_f32(rdram, base + 0x08, z);
+    store_f32(rdram, base + 0x0C, angle);
+    uint32_t body = 0;
+    if (!slot_body(rdram, slot, body)) {
+        return;
+    }
+    store_f32(rdram, body + 0x10, x);
+    store_f32(rdram, body + 0x14, y);
+    store_f32(rdram, body + 0x18, z);
+    store_f32(rdram, body + 0x20, angle);
+}
+
+bool cutscene_running(uint8_t* rdram) {
+    uint32_t head = 0x802AB200u;
+    uint32_t proc = static_cast<uint32_t>(word(rdram, head + 0x89C));
+    for (int n = 0; n < 80 && proc != 0 && proc != head; n++) {
+        int mode = word(rdram, proc + 0x04);
+        uint32_t func = static_cast<uint32_t>(word(rdram, proc + 0x0C));
+        if (mode != 0 && category_of(sess().overlay, func) == bm64::coop::kCatCutscene) {
+            return true;
+        }
+        proc = static_cast<uint32_t>(word(rdram, proc + 0x89C));
+    }
+    return false;
+}
+
+void apply_cutscene_hide(uint8_t* rdram) {
+    bool hide = cutscene_running(rdram);
+    int leader = word(rdram, 0x802AC894u);
+    if (leader < 0) {
+        hide = false;
+    }
+    uint8_t* hidden = rule(rdram);
+    int32_t* saved = rule_s32(rdram, 0x08);
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+        int control = word(rdram, base + 0x24);
+        bool teammate = control == 1 && i != leader;
+        if (hide && teammate) {
+            if (hidden[i] == 0) {
+                saved[i] = word(rdram, base + 0x48);
+                hidden[i] = 1;
+            }
+            set_word(rdram, base + 0x48, 0);
+            uint32_t obj = static_cast<uint32_t>(word(rdram, base + 0x28));
+            if ((obj & 0xFF000000u) == 0x80000000u) {
+                set_word(rdram, obj + 0x10, word(rdram, obj + 0x10) | 0x40000000);
+            }
+        }
+        else if (hidden[i] != 0) {
+            set_word(rdram, base + 0x48, saved[i]);
+            uint32_t obj = static_cast<uint32_t>(word(rdram, base + 0x28));
+            if ((obj & 0xFF000000u) == 0x80000000u) {
+                set_word(rdram, obj + 0x10, word(rdram, obj + 0x10) & ~0x40000000);
+            }
+            hidden[i] = 0;
+        }
+    }
+}
+
+void note_checkpoint_hearts(uint8_t* rdram) {
+    uint8_t* rec = rule(rdram);
+    if (rec[0x28] == 0 || rec[0x29] != 0) {
+        return;
+    }
+    bool any = false;
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        int hearts = word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride + 0x14);
+        if (hearts > 0) {
+            any = true;
+        }
+        rule_s32(rdram, 0x38)[i] = hearts;
+    }
+    if (any) {
+        rec[0x29] = 1;
+    }
+}
+
 } // namespace
 
 namespace bm64::coop {
@@ -228,6 +341,10 @@ void apply_rules(uint8_t* rdram) {
     Session& s = sess();
     if (s.unlimited) {
         set_word(rdram, 0x802AC624, 99);
+    }
+    if (s.on) {
+        note_checkpoint_hearts(rdram);
+        apply_cutscene_hide(rdram);
     }
     if (const char* probe = std::getenv("BM64_SLOT_PROBE")) {
         if (probe[0] != '\0' && probe[0] != '0' && !s.probed && bm64::debug::tick() == 200) {
@@ -263,6 +380,103 @@ extern "C" int bm64_resolved_slot(uint8_t* rdram) {
     return resolved_slot(rdram);
 }
 
+// func_80248148 is about to take the hearts==0 path. t0 holds the heart count.
+// A teammate still standing, or a shared life left, puts this bomber back at the checkpoint
+// and makes that branch look like the hit was survived. A wipe with no lives falls through.
+extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
+    if (!sess().on) {
+        return;
+    }
+    int player = static_cast<int>(MEM_W(0x70, ctx->r29));
+    if (player < 0 || player >= bm64::coop::kPlayerSlots) {
+        return;
+    }
+    uint32_t self = bm64::coop::kPlayerBase + static_cast<uint32_t>(player) * bm64::coop::kPlayerStride;
+    if (word(rdram, self + 0x24) != 1) {
+        return;
+    }
+    bool other = false;
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        if (i == player) {
+            continue;
+        }
+        uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+        int control = word(rdram, base + 0x24);
+        int hearts = word(rdram, base + 0x14);
+        if ((control == 1 || control == 2) && hearts > 0) {
+            other = true;
+            break;
+        }
+    }
+    int lives = word(rdram, 0x802AC624);
+    bool unlimited = sess().unlimited;
+    bool respawn = unlimited || other || lives > 1;
+    if (!respawn) {
+        return;
+    }
+    if (!unlimited && lives > 0) {
+        set_word(rdram, 0x802AC624, lives - 1);
+    }
+    int hearts = 3;
+    if (rule(rdram)[0x29] != 0) {
+        int saved = rule_s32(rdram, 0x38)[player];
+        if (saved > 0) {
+            hearts = saved;
+        }
+    }
+    uint32_t base = self;
+    set_word(rdram, base + 0x14, hearts);
+    set_word(rdram, base + 0x24, 1);
+    ctx->r8 = hearts;
+    if (rule(rdram)[0x28] != 0) {
+        float x = f32_at(rdram, bm64::coop::kRuleBase + 0x2C);
+        float y = f32_at(rdram, bm64::coop::kRuleBase + 0x30);
+        float z = f32_at(rdram, bm64::coop::kRuleBase + 0x34);
+        float angle = f32_at(rdram, base + 0x0C);
+        place_human(rdram, player, x + 40.0f * static_cast<float>(player), y, z, angle);
+    }
+    std::printf("[bm64 coop] Player %d respawned, shared lives %d\n", player, word(rdram, 0x802AC624));
+}
+
+// func_802512F8 just moved one bomber onto that slot's spawn. The same point is the
+// party's checkpoint, and every human is moved there.
+extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
+    if (!sess().on) {
+        return;
+    }
+    uint32_t snapped = static_cast<uint32_t>(ctx->r2);
+    int slot = -1;
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+        if (snapped == base) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        slot = word(rdram, 0x802AC894u);
+    }
+    if (slot < 0 || slot >= bm64::coop::kPlayerSlots) {
+        return;
+    }
+    uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride;
+    float x = f32_at(rdram, base + 0x00);
+    float y = f32_at(rdram, base + 0x04);
+    float z = f32_at(rdram, base + 0x08);
+    float angle = f32_at(rdram, base + 0x0C);
+    write_checkpoint(rdram, x, y, z);
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        if (i == slot) {
+            continue;
+        }
+        uint32_t other = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+        if (word(rdram, other + 0x24) != 1) {
+            continue;
+        }
+        place_human(rdram, i, x + 40.0f * static_cast<float>(i == 0 ? 1 : i), y, z, angle);
+    }
+}
+
 extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
     Session& s = sess();
     if (!s.on || s.players <= 1) {
@@ -295,12 +509,15 @@ extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
         std::printf("[bm64 coop] Overlay %d fit %d of %d players into the spawn loop\n",
             s.overlay, placed, s.players);
     }
+    float x = f32_at(rdram, bm64::coop::kPlayerBase + 0x00);
+    float y = f32_at(rdram, bm64::coop::kPlayerBase + 0x04);
+    float z = f32_at(rdram, bm64::coop::kPlayerBase + 0x08);
+    write_checkpoint(rdram, x, y, z);
 }
 
 // Pieces of the camera the controller and the lookAt process write. Copied as raw RDRAM
-// bytes so a round trip through a block is bit-identical. The 48-entry object table between
-// the eye and the look-at is not part of this: func_80251C88 searches it for an object, and
-// camera code does not own it.
+// bytes so a round trip through a block is bit-identical. The 48-entry table is what
+// func_80251C88 searches, so each human keeps the entries written while their block was live.
 struct CamPiece {
     uint32_t live;
     uint32_t size;
@@ -313,6 +530,7 @@ constexpr CamPiece kCamPieces[] = {
     { 0x8008FFE8u, 0x98, 0x070 }, // controller
     { 0x8029FEA0u, 0x1B0, 0x110 }, // camera tables
     { 0x802A5A50u, 0x10, 0x2C0 },
+    { 0x8008E658u, 0xD80, 0x2E0 }, // object entries walked by func_80251C88
 };
 
 uint8_t* ram(uint8_t* rdram, uint32_t addr) {

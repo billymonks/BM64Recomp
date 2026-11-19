@@ -34,8 +34,12 @@ constexpr int kCatCutscene = 4;
 constexpr uint32_t kCamMeta = kOverrideBase + kCategories;
 constexpr uint32_t kCamBlocks = kCamMeta + 0x18;
 constexpr int kCamCount = 8;
-constexpr uint32_t kCamStride = 0x2E0;
-constexpr uint32_t kStateEnd = kCamBlocks + kCamStride * kCamCount;
+constexpr uint32_t kCamStride = 0x1080;
+constexpr uint32_t kCamStateEnd = kCamBlocks + kCamStride * kCamCount;
+// Checkpoint and cutscene hide. Snapped with the rest of the player state.
+// 8 saved collision words, 8 hidden flags, one party checkpoint, 8 heart counts.
+constexpr uint32_t kRuleBase = kCamStateEnd;
+constexpr uint32_t kStateEnd = kRuleBase + 0x60;
 
 int local_player();
 

@@ -265,7 +265,7 @@ Code for a loopback lobby is in the build. A Discord application and two PCs are
   - Depends on: 4.6.
   - Work: costumes come from the save, and the session uses the host's save. Inject each guest's custom bomber parts into the session save image at session start.
   - Done when: everyone sees each player's own costume.
-  - Note: blocked. The 128 KB save is sent, and the field layout for custom bomber parts is not known. No offset was guessed.
+  - Note: blocked on the byte offset. `g_LoadCustomParts` (`0x8023A734`) indexes the part-file table `D_802A0BA8` with stride `0x2C`. The custom menu keeps the selected part bytes in its own overlay and calls `g_LoadCustomParts` with the part slot in `a1` (0–3). `func_802947AC` commits a save: an 18-byte EEPROM record at `18 * file + 1`, and a 144-byte stride record in the RAM image at `D_80063000`. Which of those bytes are the costume was not identified, so nothing is copied into the host save.
 - [ ] **5.6 Disconnects and polish**
   - Depends on: 5.4.
   - Work: a disconnected player is handed to AI (set controlType 2) or the match ends; add a ping and rollback indicator.
@@ -306,7 +306,7 @@ The player array move is in the binary and the loopback session can run it. Stor
     - Overlay camera commands (`func_80234778`, `func_802346C8`, `func_80234434`, …) apply to every block.
     - Render only the local player's block.
   - Done when: each instance follows its own bomber, and the hashes match across instances.
-  - Note (2026-11-19): when a session has two or more human bombers, `func_80235D7C` and the `func_80236D30` call inside `func_80236F54` run once per human. Each human's eye, look-at/mode, controller, `0x8029FEA0` table, and the 16 bytes at `0x802A5A50` live in a block at `0x80F00840` (stride `0x2E0`, inside the snapshot). Live memory is put back to the first human before the process sleeps, so peers hash the same camera. C-buttons at `0x80235974` read that human's port while their block is in. `bm64_camera_frame` then replaces the lookAt arguments with the local human's saved eye and target (mode 1 still swaps them). `func_802346C8` and `func_80234778` copy the live camera onto every block. `func_80251C88`'s object table is still shared. Not watched on two windows in a stage. A session with fewer than two humans does not swap.
+  - Note (2026-11-19): when a session has two or more human bombers, `func_80235D7C` and the `func_80236D30` call inside `func_80236F54` run once per human. Each human's eye, look-at/mode, controller, `0x8029FEA0` table, the 16 bytes at `0x802A5A50`, and the `func_80251C88` object table (`0x8008E658`–`0x8008F3D8`) live in a block at `0x80F00840` (stride `0x1080`, inside the snapshot). Live memory is put back to the first human before the process sleeps, so peers hash the same camera. C-buttons at `0x80235974` read that human's port while their block is in. `bm64_camera_frame` then replaces the lookAt arguments with the local human's saved eye and target (mode 1 still swaps them). `func_802346C8` and `func_80234778` copy the live camera onto every block. Not watched on two windows in a stage. A session with fewer than two humans does not swap.
 - [ ] **6.6 Enemy and boss targeting**
   - Depends on: 6.4.
   - Work: for each targeting process, keep a sticky target player (nearest living player, re-evaluated about once a second, deterministic). Tune per boss as needed.
@@ -321,15 +321,18 @@ The player array move is in the binary and the loopback session can run it. Stor
   - Depends on: 6.7.
   - Work: when any player takes a screen or map transition, the whole party moves and teammates appear at the entry point. Record each entry point as the checkpoint; stage start is the first.
   - Done when: multi-area stages work with 4 players.
+  - Note (2026-11-19): `func_802512F8` places one bomber on that slot's spawn. In a session the same point is stored as the party checkpoint and every other human is moved there, 40 units apart on X. Stage setup records the leader spawn as the first checkpoint. A screen change that does not call `func_802512F8` is not caught. Not watched in a stage.
 - [ ] **6.9 Death, respawn and lives**
   - Depends on: 6.8.
   - Work: find the hero death flow (start with `func_80250E2C` and `func_802506B8`). In co-op, a death costs one shared life (`D_802AC624`) and respawns the player at the last checkpoint while others continue. Party wipe with no lives left runs the original game over. Add the unlimited-lives option to the synced session settings.
   - Done when: these rules hold in normal stages and boss fights.
-  - Note: unlimited lives is the session flag from 4.6. While it is on, `apply_rules` writes `D_802AC624 = 99` every step, on every peer. Shared lives leave that word to the game. Death, checkpoint respawn, and party wipe were not changed.
+  - Note: unlimited lives is the session flag from 4.6. While it is on, `apply_rules` writes `D_802AC624 = 99` every step, on every peer. Shared lives leave that word to the game until a human is downed.
+  - Note (2026-11-19): `func_80248148` is the hit. Argument 3 or 5 clears hearts; anything else subtracts one. Hearts still above zero skip the rest. Hearts at zero continue into the sequence that stores `controlType` 3. In a session, a human on that path respawns at the checkpoint with the hearts recorded there when another human or AI still has hearts, or when more than one shared life remains. The life word is decremented unless lives are unlimited. A last bomber with one life or fewer falls through into the original sequence. Not watched in a stage.
 - [ ] **6.10 Cutscenes and scripted sequences**
   - Depends on: 6.4.
   - Work: during scripts (`WM1 …` command strings, intro and outro sequences, boss intros), the leader is scripted and teammates are hidden with collision off, then restored next to the leader afterwards.
   - Done when: no softlocks or visual breakage in any cutscene.
+  - Note (2026-11-19): while any active process entry is classified as a cutscene, every human other than `D_802AC894` has collision (`player+0x48`) forced off and bit 30 set on the bomber object's flag word. Both are restored when no such process remains. Not watched in a stage.
 - [ ] **6.11 Co-op HUD**
   - Depends on: 6.3.
   - Work: show the local player's hearts, bombs and fire; small teammate indicators; shared lives and gems.
