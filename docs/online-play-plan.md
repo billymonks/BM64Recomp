@@ -240,7 +240,7 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
   - Work: before a restore, wait for the in-flight display list (`startGfxWait`/`waitForGfxFinish`). Keep gfx buffer state out of snapshots.
   - Done when: repeated restores cause no crashes or corruption beyond one frame.
   - Note: `bm64_wait_gfx` is recompiled code, so the patched loop waits before `bm64_step_begin` whenever a restore is pending. Online play waits before every step, because that step may roll back. The 9,591-tick SyncTest did not crash.
-- [ ] **3.6 Audio isolation**
+- [x] **3.6 Audio isolation**
   - Depends on: 2.6, 3.4.
   - Work: wrap `g_PlayGlobalSound`, `g_PlayLocalSound` and `g_StopSound` with deterministic virtual handles mapped to real ones on the host. Add a "speculative" flag that suppresses new sounds. Handle the gameplay audio reads found in 2.6.
   - Done when: sound behaves normally offline, and the audio state doesn't affect hashes.
@@ -251,13 +251,14 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
     4. [user] Listening test with no session: 5 minutes of a story stage and one Battle match. Listen for missing, doubled or stuck sounds, and for wrong left/right pan (`g_StopSound` is the pan helper). Report the stage and the moment.
     5. [agent] For each report, find the sound call involved (`xref.py` on `g_PlayGlobalSound` and `g_PlayLocalSound` in that overlay) and check that its handle goes through the virtual id path.
     6. Tick when steps 2–4 pass.
-  - Note: `g_PlayGlobalSound` and `g_PlayLocalSound` return a virtual handle. Stopping a voice is `func_80266930` via `func_8026BE80`, which resolves the virtual id. `g_StopSound` is the pan helper; its entry returns immediately when the step is speculative, so a resim does not recompute pan. Speculative steps do not call the audio driver. Not listened to.
+  - Note: `g_PlayGlobalSound` and `g_PlayLocalSound` return a virtual handle. Stopping a voice is `func_80266930` via `func_8026BE80`, which resolves the virtual id. `g_StopSound` is the pan helper; its entry returns immediately when the step is speculative, so a resim does not recompute pan. Speculative steps do not call the audio driver. Counters live in `src/game/bm64_state.cpp` and on the debug overlay.
+  - Note (2026-11-19): `test.bm64rec` reached tick 9591 with the normal audio driver and with `SDL_AUDIODRIVER=dummy`. The hash logs match on all 9591 ticks. `BM64_SYNCTEST=1` on the same file exited at tick 9591 with no `BM64 SYNCTEST FAIL`, and both runs printed `speculative starts 0, virtual ids reused 0`. The user then played a story stage and a Battle match offline and reported nothing out of place. The stage was not named. No bad-sound report, so step 5 had nothing to trace.
 - [x] **3.7 Snapshot ring buffer**
   - Depends on: 3.1, 3.3, 3.5, 3.6.
   - Work: `save(tick)` and `load(tick)` combining the RDRAM ranges, patch globals and coroutine state, with a ring of at least 10 snapshots. Measure the cost.
   - Done when: save plus load takes under 1 ms, and resimulating 8 ticks takes under 8 ms on a mid-range PC.
   - Note: ring of 16. Measured save 336 µs + load 243 µs. 8 ticks at 717 µs is about 5.7 ms. The machine is an RTX 3090, not a mid-range PC.
-  - Note (audit, 2026-11-19): ticked while its dependency 3.6 is still open. The ring itself works; audio isolation has not been listened to. The ring size caps the rollback window: `BM64_NET_ROLLBACK` is clamped to 12 so a rollback never reaches a snapshot the ring has overwritten.
+  - Note (audit, 2026-11-19): ticked while its dependency 3.6 was still open. The ring itself works. 3.6 was listened to and ticked later the same day. The ring size caps the rollback window: `BM64_NET_ROLLBACK` is clamped to 12 so a rollback never reaches a snapshot the ring has overwritten.
 - [ ] **3.8 SyncTest mode**
   - Depends on: 3.7.
   - Work: a debug mode that runs every tick as save, step, load, step, compare hashes (like GGPO's SyncTest), with a configurable rollback depth.

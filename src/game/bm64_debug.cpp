@@ -343,6 +343,7 @@ namespace {
         if (state.record_file.is_open()) {
             state.record_file.close();
         }
+        bm64::state::report_sound_counters();
         printf("[bm64 debug] Exiting at tick %llu: %s\n", (unsigned long long)state.tick, reason);
         fflush(stdout);
         ultramodern::quit();
@@ -482,6 +483,9 @@ namespace {
         snprintf(buf, sizeof(buf), "camera eye (%.1f, %.1f, %.1f)   at (%.1f, %.1f, %.1f)",
             read_f32(rdram, camera_eye), read_f32(rdram, camera_eye + 4), read_f32(rdram, camera_eye + 8),
             read_f32(rdram, camera_at), read_f32(rdram, camera_at + 4), read_f32(rdram, camera_at + 8));
+        lines.emplace_back(buf);
+
+        bm64::state::sound_counter_line(buf, sizeof(buf));
         lines.emplace_back(buf);
 
         char net[160];

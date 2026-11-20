@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -99,6 +100,11 @@ struct Engine {
     uint8_t* rdram = nullptr;
 
     Sound sound;
+    // Real voices returned by a play function while the step was speculative. Must stay 0.
+    uint64_t sound_spec_starts = 0;
+    // Starts whose (tick, sound, source, position) already had a virtual id.
+    uint64_t sound_ids_reused = 0;
+    std::atomic<bool> sound_reported{ false };
     int noted_sound = 0;
     int noted_source = 0;
     int noted_x = 0;
@@ -137,6 +143,31 @@ Engine& eng() {
     return e;
 }
 
+void report_sound_counters() {
+    Engine& e = eng();
+    if (e.sound_reported.exchange(true)) {
+        return;
+    }
+    std::printf("[bm64 state] Sound counters: speculative starts %llu, virtual ids reused %llu\n",
+        static_cast<unsigned long long>(e.sound_spec_starts),
+        static_cast<unsigned long long>(e.sound_ids_reused));
+    std::fflush(stdout);
+}
+
+void sound_counters_atexit() {
+    report_sound_counters();
+}
+
+void sound_counter_line(char* buf, size_t cap) {
+    if (buf == nullptr || cap == 0) {
+        return;
+    }
+    const Engine& e = eng();
+    std::snprintf(buf, cap, "sound speculative starts %llu   virtual ids reused %llu",
+        static_cast<unsigned long long>(e.sound_spec_starts),
+        static_cast<unsigned long long>(e.sound_ids_reused));
+}
+
 uint64_t micros(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
 }
@@ -147,6 +178,8 @@ void configure() {
         return;
     }
     e.configured = true;
+    // Registered after Engine is constructed, so this runs before that static is destroyed.
+    std::atexit(sound_counters_atexit);
     if (const char* v = std::getenv("BM64_SYNCTEST")) {
         e.synctest = v[0] != '0';
     }
@@ -645,6 +678,13 @@ extern "C" void bm64_sound_enter(int sound_id, int source, int xbits, int ybits,
     e.noted_x = xbits;
     e.noted_y = ybits;
     e.noted_z = zbits;
+    for (const auto& v : e.sound.voices) {
+        if (v.tick == e.sim && v.sound == sound_id && v.source == source &&
+            v.x == xbits && v.y == ybits && v.z == zbits) {
+            e.sound_ids_reused++;
+            break;
+        }
+    }
 }
 
 extern "C" int bm64_sound_speculative(void) {
@@ -667,6 +707,9 @@ extern "C" int bm64_sound_should_skip(void) {
 
 extern "C" int bm64_sound_leave(int real_handle) {
     auto& e = bm64::state::eng();
+    if (e.speculative && real_handle >= 0) {
+        e.sound_spec_starts++;
+    }
     for (const auto& v : e.sound.voices) {
         if (v.tick == e.sim && v.sound == e.noted_sound && v.source == e.noted_source &&
             v.x == e.noted_x && v.y == e.noted_y && v.z == e.noted_z) {
