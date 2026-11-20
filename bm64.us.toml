@@ -344954,3 +344954,104 @@ text = """
 """
 
 # END bm64 main-player readers
+
+# BEGIN bm64 co-op ports and movement camera
+# Input accessors take a bomber slot in a0 and index the 4-port pad history with it.
+# In a story session the slot is mapped to its owner's port; -1 means the slot reads nothing.
+[[patches.hook]]
+func = "func_802399AC"
+before_vram = 0x802399AC
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_80239E88"
+before_vram = 0x80239E88
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_80239FF8"
+before_vram = 0x80239FF8
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_80239E28"
+before_vram = 0x80239E28
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_80239F70"
+before_vram = 0x80239F70
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_80239EE8"
+before_vram = 0x80239EE8
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_80239714"
+before_vram = 0x80239714
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+[[patches.hook]]
+func = "func_802395A8"
+before_vram = 0x802395A8
+text = """
+    extern int bm64_coop_port(uint8_t* rdram, int port);
+    int coop_port = bm64_coop_port(rdram, (int)ctx->r4);
+    if (coop_port < 0) { ctx->r2 = 0; return; }
+    ctx->r4 = (int64_t)coop_port;
+"""
+
+# Bomber movement (s0 = slot) turns the stick by the camera rotation from func_80234858.
+[[patches.hook]]
+func = "func_8024E088"
+before_vram = 0x8024E880
+text = """
+    extern void bm64_camera_for_bomber(int slot);
+    bm64_camera_for_bomber((int)ctx->r16);
+"""
+
+[[patches.hook]]
+func = "func_80234858"
+before_vram = 0x80234858
+text = """
+    extern int bm64_camera_rotation(uint8_t* rdram, recomp_context* ctx);
+    if (bm64_camera_rotation(rdram, ctx)) { return; }
+"""
+# END bm64 co-op ports and movement camera

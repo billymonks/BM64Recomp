@@ -34,10 +34,10 @@ constexpr int kCatCutscene = 4;
 constexpr uint32_t kCamMeta = kOverrideBase + kCategories;
 constexpr uint32_t kCamBlocks = kCamMeta + 0x18;
 constexpr int kCamCount = 8;
-constexpr uint32_t kCamStride = 0x1080;
+constexpr uint32_t kCamStride = 0x2D0;
 constexpr uint32_t kCamStateEnd = kCamBlocks + kCamStride * kCamCount;
-// Checkpoint and cutscene hide. Snapped with the rest of the player state.
-// 8 saved collision words, 8 hidden flags, one party checkpoint, 8 heart counts.
+// Checkpoint, cutscene hide and port map. Snapped with the rest of the player state.
+// 8 hidden flags, 8 saved collision words, one party checkpoint, 8 heart counts, 8 port bytes.
 constexpr uint32_t kRuleBase = kCamStateEnd;
 constexpr uint32_t kStateEnd = kRuleBase + 0x60;
 
@@ -48,7 +48,6 @@ void note_overlay(int overlay_id);
 bool active();
 bool omit_render_camera();
 void apply_rules(uint8_t* rdram);
-void hand_to_ai(uint8_t* rdram, int player);
 
 } // namespace bm64::coop
 

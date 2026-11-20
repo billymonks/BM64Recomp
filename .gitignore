@@ -76,3 +76,5 @@ gamecontrollerdb.txt
 
 # RSP Microcode recompiled output
 aspMain.cpp
+# Desync dumps from online sessions
+desync/

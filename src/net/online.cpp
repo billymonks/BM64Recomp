@@ -35,7 +35,9 @@
 namespace bm64::online {
 namespace {
 
-constexpr uint32_t kProtocol = 2;
+constexpr uint32_t kProtocol = 3;
+// bm64::state keeps 16 snapshots, and a rollback needs one for every tick it can rewind.
+constexpr int kMaxRollback = 12;
 // A UDP datagram cannot carry the 128 KB save image. Handshake chunks stay under a typical MTU.
 constexpr uint32_t kSaveChunk = 1000;
 
@@ -128,7 +130,6 @@ struct Runtime {
     int players = 1;
     bool launch_set = false;
     bool launch_host = true;
-    bool ai_sent[4]{};
 };
 
 Runtime& rt() {
@@ -526,7 +527,7 @@ void handshake() {
         cfg.input_delay = std::atoi(d);
     }
     if (const char* r = std::getenv("BM64_NET_ROLLBACK")) {
-        cfg.max_rollback = std::atoi(r);
+        cfg.max_rollback = std::clamp(std::atoi(r), 1, kMaxRollback);
     }
     rt().session = std::make_unique<bm64::rollback::Session>(cfg, *link);
     rt().link = std::move(link);
@@ -558,12 +559,6 @@ int begin_frame(uint8_t* rdram) {
         r.accept = step.accept_sample;
         r.confirmed = step.confirmed;
         r.step_tick = step.tick;
-        for (int p = 0; p < r.players && p < 4; p++) {
-            if (p != r.player && !r.ai_sent[p] && r.session->ticks_since_peer(p) > 300) {
-                bm64::coop::hand_to_ai(rdram, p);
-                r.ai_sent[p] = true;
-            }
-        }
         if (step.loaded) {
             std::printf("[bm64 net] Rollback to tick %llu (depth %d, %d total)\n",
                 static_cast<unsigned long long>(step.tick), r.session->max_depth(), r.session->rollbacks());
@@ -579,8 +574,8 @@ void end_frame(uint8_t* rdram, uint64_t hash) {
     if (!r.session) {
         return;
     }
-    // A non-presented resim step does not match the peer that presented that tick, and the next
-    // presented step lands on the same state. Hashing the throwaway step reports a false desync.
+    // Only final ticks: a tick built on an earlier guess is resimulated later and would report a
+    // false desync. Intermediate resim steps skip render-side writes, so they are left out too.
     if (r.confirmed && !r.spec) {
         r.session->notify_hash(r.step_tick, hash);
     }

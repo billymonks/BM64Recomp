@@ -58,7 +58,8 @@ struct Step {
     // Throwaway step: the caller should not start real sounds.
     bool speculative = false;
     bool loaded = false;
-    // Every player's input for this tick was received, not predicted.
+    // This tick and every tick before it ran on received input. Its state is final and will
+    // not be resimulated, so it is the only kind of tick whose hash peers can compare.
     bool confirmed = false;
     // True the first time this tick is reached. Resims must not sample hardware again.
     bool accept_sample = false;
@@ -83,7 +84,10 @@ public:
     int rollbacks() const { return rollbacks_; }
     int max_depth() const { return max_depth_; }
     int input_delay() const { return config_.input_delay; }
+    // Ticks before this one are final.
     uint64_t confirmed_tick() const { return confirmed_; }
+    // Polls that waited because the prediction window was full.
+    int window_stalls() const { return window_stalls_; }
     uint64_t predicted_tick() const { return simulated_; }
     bool desynced() const { return desynced_; }
     uint64_t desync_tick() const { return desync_tick_; }
@@ -113,10 +117,12 @@ private:
     uint32_t load_seq_ = 0;
     uint32_t peer_load_seq_[kMaxPlayers]{};
     uint64_t peer_sim_[kMaxPlayers]{};
+    uint64_t peer_confirmed_[kMaxPlayers]{};
     bool peer_seen_[kMaxPlayers]{};
     uint64_t peer_heard_[kMaxPlayers]{};
     bool barrier_open_ = false;
     int stalls_ = 0;
+    int window_stalls_ = 0;
 
     bool resim_ = false;
     uint64_t resim_until_ = 0;
@@ -133,7 +139,7 @@ private:
     uint64_t furthest_ = 0;
 
     void recv_all();
-    void note_peer(int player, uint32_t seq, uint64_t remote_sim);
+    void note_peer(int player, uint32_t seq, uint64_t remote_sim, uint64_t remote_confirmed);
     bool peers_caught_up() const;
     uint64_t slowest_peer() const;
     void remember_remote_hash(uint64_t tick, uint64_t remote_hash);
@@ -141,6 +147,8 @@ private:
     void send_raw(uint8_t type, uint64_t tick, const uint8_t* payload, size_t size);
     Pad pad_for(int player, uint64_t tick, bool& predicted) const;
     int rollback_target() const;
+    bool tick_final(uint64_t tick) const;
+    void advance_confirmed();
     void note_remote(int player, uint64_t tick, const Pad& pad);
 };
 

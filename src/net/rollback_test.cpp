@@ -11,6 +11,12 @@ struct World {
     int time = 0;
     int loss_percent = 0;
     uint32_t rng = 1;
+    // Packets from hold_sender are dropped while time is in [hold_from, hold_until).
+    // hold_tick >= 0 limits that to the input packet for one tick.
+    int hold_sender = -1;
+    int hold_tick = -1;
+    int hold_from = 0;
+    int hold_until = 0;
     struct Msg {
         int due;
         int dest;
@@ -22,6 +28,18 @@ struct World {
         rng = rng * 1664525u + 1013904223u;
         return loss_percent > 0 && static_cast<int>(rng % 100) < loss_percent;
     }
+
+    bool held(int sender, const uint8_t* data) const {
+        if (sender != hold_sender || time < hold_from || time >= hold_until) {
+            return false;
+        }
+        if (hold_tick < 0) {
+            return true;
+        }
+        uint64_t tick = 0;
+        std::memcpy(&tick, data + 4, sizeof(tick));
+        return data[0] == 1 && tick == static_cast<uint64_t>(hold_tick);
+    }
 };
 
 struct Pipe : bm64::rollback::Transport {
@@ -30,7 +48,7 @@ struct Pipe : bm64::rollback::Transport {
     int delay = 1;
 
     void send(const uint8_t* data, size_t size) override {
-        if (world->drop()) {
+        if (world->drop() || world->held(me, data)) {
             return;
         }
         World::Msg msg;
@@ -105,11 +123,31 @@ struct Peer {
     bm64::rollback::Session* session = nullptr;
     uint64_t samples = 0;
     uint64_t steps = 0;
+    int idle = 0;
 };
 
-bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool expect_rollback, const char* name) {
+struct PairOptions {
+    int frames = 120;
+    int delay_packets = 1;
+    int loss = 0;
+    int input_delay = 1;
+    int max_frame_advantage = 40;
+    bool expect_rollback = false;
+    int hold_sender = -1;
+    int hold_tick = -1;
+    int hold_from = 0;
+    int hold_until = 0;
+    uint64_t min_confirmed = 8;
+};
+
+bool run_pair(const PairOptions& opt, const char* name) {
     World world;
-    world.loss_percent = loss;
+    world.loss_percent = opt.loss;
+    world.hold_sender = opt.hold_sender;
+    world.hold_tick = opt.hold_tick;
+    world.hold_from = opt.hold_from;
+    world.hold_until = opt.hold_until;
+    int delay_packets = opt.delay_packets;
     Pipe pipes[2];
     pipes[0].world = &world;
     pipes[1].world = &world;
@@ -120,9 +158,9 @@ bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool exp
 
     bm64::rollback::Config cfg;
     cfg.player_count = 2;
-    cfg.input_delay = input_delay;
+    cfg.input_delay = opt.input_delay;
     cfg.max_rollback = 8;
-    cfg.max_frame_advantage = 40;
+    cfg.max_frame_advantage = opt.max_frame_advantage;
     cfg.local_player = 0;
     bm64::rollback::Session a(cfg, pipes[0]);
     cfg.local_player = 1;
@@ -133,7 +171,7 @@ bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool exp
     peers[0].fake.save(0);
     peers[1].fake.save(0);
 
-    for (int frame = 0; frame < frames; frame++) {
+    for (int frame = 0; frame < opt.frames; frame++) {
         world.time++;
         for (int p = 0; p < 2; p++) {
             bool sampled = false;
@@ -149,8 +187,17 @@ bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool exp
                 peers[p].fake.save(step.tick + 1);
                 peers[p].steps++;
                 stepped = true;
-                if (step.confirmed && (step.tick % 7) == 0) {
+                // The same rule as bm64::online::end_frame.
+                if (step.confirmed && !step.speculative) {
                     peers[p].session->notify_hash(step.tick, peers[p].fake.state);
+                }
+                uint64_t predicted = peers[p].session->predicted_tick();
+                uint64_t confirmed = peers[p].session->confirmed_tick();
+                uint64_t ahead = predicted > confirmed ? predicted - confirmed : 0;
+                if (ahead > static_cast<uint64_t>(cfg.max_rollback)) {
+                    std::fprintf(stderr, "%s: peer %d predicted %llu ticks past the last confirmed tick\n",
+                        name, p, static_cast<unsigned long long>(ahead));
+                    return false;
                 }
                 if (step.accept_sample) {
                     peers[p].session->push_local(sample(p, peers[p].samples));
@@ -158,7 +205,11 @@ bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool exp
                     sampled = true;
                 }
             }
-            if (!stepped && !sampled) {
+            // Time sync may pause a peer for a few frames. A held peer, and anyone waiting on it, may
+            // pause for the whole hold.
+            bool holding = world.time >= world.hold_from && world.time < world.hold_until;
+            peers[p].idle = (stepped || sampled || holding) ? 0 : peers[p].idle + 1;
+            if (peers[p].idle > 16) {
                 std::fprintf(stderr, "%s: peer %d stalled out at frame %d\n", name, p, frame);
                 return false;
             }
@@ -166,8 +217,8 @@ bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool exp
     }
 
     uint64_t confirmed = a.confirmed_tick() < b.confirmed_tick() ? a.confirmed_tick() : b.confirmed_tick();
-    if (confirmed < 8 || peers[0].fake.at(confirmed) != peers[1].fake.at(confirmed)) {
-        std::fprintf(stderr, "%s: confirmed state differs at %llu (%016llx %016llx) steps %llu/%llu rollbacks %d/%d\n",
+    if (confirmed < opt.min_confirmed || peers[0].fake.at(confirmed) != peers[1].fake.at(confirmed)) {
+        std::fprintf(stderr, "%s: confirmed state differs or stopped short at %llu (%016llx %016llx) steps %llu/%llu rollbacks %d/%d\n",
             name, static_cast<unsigned long long>(confirmed),
             static_cast<unsigned long long>(peers[0].fake.at(confirmed)),
             static_cast<unsigned long long>(peers[1].fake.at(confirmed)),
@@ -180,7 +231,7 @@ bool run_pair(int frames, int delay_packets, int loss, int input_delay, bool exp
         std::fprintf(stderr, "%s: false desync at %llu\n", name, static_cast<unsigned long long>(a.desync_tick()));
         return false;
     }
-    if (expect_rollback && a.rollbacks() + b.rollbacks() == 0) {
+    if (opt.expect_rollback && a.rollbacks() + b.rollbacks() == 0) {
         std::fprintf(stderr, "%s: expected a rollback and none happened\n", name);
         return false;
     }
@@ -258,13 +309,50 @@ bool run_barrier() {
 
 int main() {
     int failed = 0;
-    if (!run_pair(120, 1, 0, 1, false, "lockstep")) {
+    PairOptions one_late;
+    one_late.frames = 120;
+    if (!run_pair(one_late, "one tick late")) {
         failed++;
     }
-    if (!run_pair(180, 4, 0, 1, true, "latency")) {
+    PairOptions latency;
+    latency.frames = 180;
+    latency.delay_packets = 4;
+    latency.expect_rollback = true;
+    if (!run_pair(latency, "latency")) {
         failed++;
     }
-    if (!run_pair(200, 2, 25, 2, false, "loss")) {
+    PairOptions loss;
+    loss.frames = 200;
+    loss.delay_packets = 2;
+    loss.loss = 25;
+    loss.input_delay = 2;
+    if (!run_pair(loss, "loss")) {
+        failed++;
+    }
+    // Input arrives in time, except tick 20, which is held back for six frames. The ticks after
+    // it have their own inputs but were simulated on a guess for tick 20, so they must not be hashed.
+    PairOptions late_packet;
+    late_packet.frames = 80;
+    late_packet.input_delay = 3;
+    late_packet.hold_sender = 1;
+    late_packet.hold_tick = 20;
+    late_packet.hold_from = 0;
+    late_packet.hold_until = 26;
+    late_packet.expect_rollback = true;
+    if (!run_pair(late_packet, "late packet")) {
+        failed++;
+    }
+    // One peer goes silent for two seconds with the game's time-sync setting. The other must stop
+    // inside the rollback window instead of guessing ticks it can no longer correct.
+    PairOptions silence;
+    silence.frames = 260;
+    silence.input_delay = 3;
+    silence.max_frame_advantage = 3;
+    silence.hold_sender = 1;
+    silence.hold_from = 20;
+    silence.hold_until = 140;
+    silence.min_confirmed = 120;
+    if (!run_pair(silence, "silence")) {
         failed++;
     }
     if (!run_barrier()) {

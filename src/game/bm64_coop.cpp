@@ -22,7 +22,6 @@ struct Session {
     int overlay = -1;
     int override_slot = -1;
     bool probed = false;
-    bool ai_handed[bm64::coop::kPlayerSlots]{};
 };
 
 Session& sess() {
@@ -38,19 +37,39 @@ void set_word(uint8_t* rdram, uint32_t addr, int32_t value) {
     *reinterpret_cast<int32_t*>(rdram + (addr - 0x80000000u)) = value;
 }
 
-bool rival_map(int id) {
+// Overlay id (gOverlayID) to bank and sub-overlay, both 1-based. False for "main" and unknown ids.
+bool overlay_bank(int id, int& bank, int& sub) {
     static const int kBanks[] = { 4, 6, 7, 10, 7, 15, 10, 13, 6, 2, 2, 2, 1, 10 };
     int remaining = id - 1;
-    for (int bank = 0; bank < 14 && remaining >= 0; bank++) {
-        if (remaining < kBanks[bank]) {
-            int b = bank + 1;
-            int sub = remaining + 1;
-            return (b == 4 && sub == 10) || (b == 5 && sub == 7) || (b == 6 && sub == 15) ||
-                (b == 8 && sub == 13) || (b == 9 && sub == 5) || (b == 9 && sub == 6);
+    for (int b = 0; b < 14 && remaining >= 0; b++) {
+        if (remaining < kBanks[b]) {
+            bank = b + 1;
+            sub = remaining + 1;
+            return true;
         }
-        remaining -= kBanks[bank];
+        remaining -= kBanks[b];
     }
     return false;
+}
+
+bool rival_map(int id) {
+    int b = 0, sub = 0;
+    if (!overlay_bank(id, b, sub)) {
+        return false;
+    }
+    return (b == 4 && sub == 10) || (b == 5 && sub == 7) || (b == 6 && sub == 15) ||
+        (b == 8 && sub == 13) || (b == 9 && sub == 5) || (b == 9 && sub == 6);
+}
+
+// Banks 4-9 are the worlds and 10-12 the large boss maps. Battle arenas (bank 14), menus and
+// sequences are not story stages, so the co-op rules leave them as the original game plays them.
+bool story_map(int id) {
+    int b = 0, sub = 0;
+    return overlay_bank(id, b, sub) && b >= 4 && b <= 12;
+}
+
+bool story() {
+    return sess().on && story_map(sess().overlay);
 }
 
 float f32_at(uint8_t* rdram, uint32_t addr) {
@@ -137,7 +156,7 @@ int sticky_target(uint8_t* rdram);
 
 int resolved_slot(uint8_t* rdram) {
     int slot = word(rdram, 0x802AC894u);
-    if (!sess().on) {
+    if (!story()) {
         return slot;
     }
     uint32_t proc = static_cast<uint32_t>(word(rdram, 0x802AC344u));
@@ -202,6 +221,37 @@ uint8_t* rule(uint8_t* rdram) {
 
 int32_t* rule_s32(uint8_t* rdram, uint32_t offset) {
     return reinterpret_cast<int32_t*>(rule(rdram) + offset);
+}
+
+// Bytes 0x58-0x5F of the rule block: the controller port each player slot reads.
+// 0 keeps the slot's own port, kPortSilent reads no input, anything else is port + 1.
+constexpr uint32_t kPortMap = 0x58;
+constexpr uint8_t kPortSilent = 0x80;
+
+uint8_t* port_map(uint8_t* rdram) {
+    return rule(rdram) + kPortMap;
+}
+
+// The session player whose pad drives this slot, or -1.
+int player_of_slot(uint8_t* rdram, int slot) {
+    uint8_t mapped = port_map(rdram)[slot];
+    if (mapped == 0) {
+        return slot;
+    }
+    if (mapped == kPortSilent) {
+        return -1;
+    }
+    return mapped - 1;
+}
+
+int slot_of_player(uint8_t* rdram, int player) {
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        int control = word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride + 0x24);
+        if (control == 1 && player_of_slot(rdram, i) == player) {
+            return i;
+        }
+    }
+    return player;
 }
 
 void store_f32(uint8_t* rdram, uint32_t addr, float value) {
@@ -339,10 +389,10 @@ bool omit_render_camera() {
 
 void apply_rules(uint8_t* rdram) {
     Session& s = sess();
-    if (s.unlimited) {
-        set_word(rdram, 0x802AC624, 99);
-    }
-    if (s.on) {
+    if (story()) {
+        if (s.unlimited) {
+            set_word(rdram, 0x802AC624, 99);
+        }
         note_checkpoint_hearts(rdram);
         apply_cutscene_hide(rdram);
     }
@@ -354,20 +404,6 @@ void apply_rules(uint8_t* rdram) {
                 bm64::coop::kPlayerBase);
         }
     }
-}
-
-void hand_to_ai(uint8_t* rdram, int player) {
-    Session& s = sess();
-    if (player < 0 || player >= kPlayerSlots || s.ai_handed[player]) {
-        return;
-    }
-    uint32_t addr = kPlayerBase + static_cast<uint32_t>(player) * kPlayerStride + 0x24;
-    if (word(rdram, addr) != 1) {
-        return;
-    }
-    set_word(rdram, addr, 2);
-    s.ai_handed[player] = true;
-    std::printf("[bm64 coop] Player %d handed to AI\n", player);
 }
 
 } // namespace bm64::coop
@@ -384,7 +420,7 @@ extern "C" int bm64_resolved_slot(uint8_t* rdram) {
 // A teammate still standing, or a shared life left, puts this bomber back at the checkpoint
 // and makes that branch look like the hit was survived. A wipe with no lives falls through.
 extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
-    if (!sess().on) {
+    if (!story()) {
         return;
     }
     int player = static_cast<int>(MEM_W(0x70, ctx->r29));
@@ -441,7 +477,7 @@ extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
 // func_802512F8 just moved one bomber onto that slot's spawn. The same point is the
 // party's checkpoint, and every human is moved there.
 extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
-    if (!sess().on) {
+    if (!story()) {
         return;
     }
     uint32_t snapped = static_cast<uint32_t>(ctx->r2);
@@ -479,18 +515,28 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
 
 extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
     Session& s = sess();
-    if (!s.on || s.players <= 1) {
+    if (!story()) {
         return;
     }
-    // func_80245CDC visits every reserved slot. Rival maps already use 1..3.
+    // func_80245CDC visits every reserved slot. Rival maps drive 1..3 themselves, so co-op
+    // players go in 0 and 4..7 there, and slots 1..3 must not read a teammate's pad.
     bool rival = rival_map(s.overlay);
+    uint8_t* ports = port_map(rdram);
+    std::memset(ports, 0, bm64::coop::kPlayerSlots);
+    if (rival) {
+        ports[1] = ports[2] = ports[3] = kPortSilent;
+    }
     int placed = 0;
     for (int i = 0; i < bm64::coop::kPlayerSlots && placed < s.players; i++) {
         if (rival && (i == 1 || i == 2 || i == 3)) {
             continue;
         }
         uint32_t slot = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
-        if (word(rdram, slot + 0x24) == 0) {
+        int control = word(rdram, slot + 0x24);
+        if (control != 0 && control != 1) {
+            continue;
+        }
+        if (control == 0) {
             set_word(rdram, slot + 0x24, 1);
             // g_SpawnPlayer copies these floats onto the bomber. Offset teammates along X so they are not inside the leader.
             if (i != 0) {
@@ -503,6 +549,8 @@ extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
                 set_word(rdram, slot, static_cast<int32_t>(std::bit_cast<uint32_t>(x)));
             }
         }
+        // Session player n's pad is on port n. A bomber reads the port equal to its slot.
+        ports[i] = static_cast<uint8_t>(placed + 1);
         placed++;
     }
     if (placed < s.players) {
@@ -516,8 +564,8 @@ extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
 }
 
 // Pieces of the camera the controller and the lookAt process write. Copied as raw RDRAM
-// bytes so a round trip through a block is bit-identical. The 48-entry table is what
-// func_80251C88 searches, so each human keeps the entries written while their block was live.
+// bytes so a round trip through a block is bit-identical. The 48 x 0x48 table that follows
+// the eye at 0x8008E658 is shared world state (the bomb pool), so it stays out of the blocks.
 struct CamPiece {
     uint32_t live;
     uint32_t size;
@@ -526,12 +574,15 @@ struct CamPiece {
 
 constexpr CamPiece kCamPieces[] = {
     { 0x8008E648u, 0x10, 0x000 }, // eye
-    { 0x8008F3D8u, 0x60, 0x010 }, // look-at, mode, orbit
+    { 0x8008F3D8u, 0x60, 0x010 }, // look-at, rotation, mode
     { 0x8008FFE8u, 0x98, 0x070 }, // controller
     { 0x8029FEA0u, 0x1B0, 0x110 }, // camera tables
     { 0x802A5A50u, 0x10, 0x2C0 },
-    { 0x8008E658u, 0xD80, 0x2E0 }, // object entries walked by func_80251C88
 };
+static_assert(0x2C0 + 0x10 <= bm64::coop::kCamStride);
+
+// Camera rotation (pitch, yaw, roll in degrees) at 0x8008F3F8, inside the core piece.
+constexpr uint32_t kCamRotation = 0x010 + 0x20;
 
 uint8_t* ram(uint8_t* rdram, uint32_t addr) {
     return rdram + (addr - 0x80000000u);
@@ -593,11 +644,28 @@ void ensure_blocks(uint8_t* rdram) {
 }
 
 bool camera_multi(uint8_t* rdram) {
-    return sess().on && meta(rdram, 2) != 0;
+    return story() && meta(rdram, 2) != 0;
+}
+
+// True when `slot` is a human with its own camera block this tick.
+bool has_camera_block(uint8_t* rdram, int slot) {
+    if (!story() || meta(rdram, 4) == 0 || slot < 0 || slot >= bm64::coop::kCamCount) {
+        return false;
+    }
+    int count = meta(rdram, 0);
+    if (count < 2) {
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (ram(rdram, bm64::coop::kCamMeta)[8 + i] == static_cast<uint8_t>(slot)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 extern "C" void bm64_camera_enter(uint8_t* rdram) {
-    if (!sess().on) {
+    if (!story()) {
         return;
     }
     int index = meta(rdram, 1);
@@ -654,15 +722,17 @@ extern "C" int bm64_camera_mode_word(uint8_t* rdram) {
     return word(rdram, 0x8008F428u);
 }
 
+// The C-button read in func_80235934 passes this slot to func_802399AC, whose port hook
+// turns it into the pad that drives the slot.
 extern "C" int bm64_camera_port(uint8_t* rdram) {
-    if (!sess().on) {
+    if (!story()) {
         return 0;
     }
     return meta(rdram, 3);
 }
 
 extern "C" void bm64_camera_broadcast(uint8_t* rdram) {
-    if (!sess().on) {
+    if (!story()) {
         return;
     }
     ensure_blocks(rdram);
@@ -672,26 +742,9 @@ extern "C" void bm64_camera_broadcast(uint8_t* rdram) {
 }
 
 extern "C" void bm64_camera_frame(uint8_t* rdram, recomp_context* ctx) {
-    if (!bm64::coop::active() || meta(rdram, 4) == 0) {
-        return;
-    }
-    int local = sess().local_player;
-    int count = meta(rdram, 0);
-    if (local <= 0 || count < 2) {
-        return;
-    }
+    int local = slot_of_player(rdram, sess().local_player);
     int primary = ram(rdram, bm64::coop::kCamMeta)[8];
-    if (local == primary) {
-        return;
-    }
-    bool listed = false;
-    for (int i = 0; i < count; i++) {
-        if (ram(rdram, bm64::coop::kCamMeta)[8 + i] == static_cast<uint8_t>(local)) {
-            listed = true;
-            break;
-        }
-    }
-    if (!listed || local >= bm64::coop::kCamCount) {
+    if (local == primary || !has_camera_block(rdram, local)) {
         return;
     }
     uint32_t block = block_addr(local);
@@ -720,4 +773,42 @@ extern "C" void bm64_camera_frame(uint8_t* rdram, recomp_context* ctx) {
     store(ctx->r5, 0, at_x);
     store(ctx->r5, 4, at_y);
     store(ctx->r5, 8, at_z);
+}
+
+// Entry of every input accessor that takes a port in a0. Bombers pass their slot, and only
+// four ports exist, so a slot is mapped to the pad of the session player who owns it.
+// Returns -1 when the slot must read no input.
+extern "C" int bm64_coop_port(uint8_t* rdram, int port) {
+    if (!story() || port < 0 || port >= bm64::coop::kPlayerSlots) {
+        return port;
+    }
+    return player_of_slot(rdram, port);
+}
+
+namespace {
+// Set just before func_8024E088 asks func_80234858 for the camera rotation, consumed by that call.
+int g_rotation_slot = -1;
+}
+
+extern "C" void bm64_camera_for_bomber(int slot) {
+    g_rotation_slot = slot;
+}
+
+// Movement turns the stick by the camera yaw. A teammate steers by their own camera, which is
+// in their block; live memory holds the first human's camera between updates.
+extern "C" int bm64_camera_rotation(uint8_t* rdram, recomp_context* ctx) {
+    int slot = g_rotation_slot;
+    g_rotation_slot = -1;
+    int primary = ram(rdram, bm64::coop::kCamMeta)[8];
+    if (slot < 0 || slot == primary || !has_camera_block(rdram, slot)) {
+        return 0;
+    }
+    uint32_t rotation = block_addr(slot) + kCamRotation;
+    gpr outs[3] = { ctx->r4, ctx->r5, ctx->r6 };
+    for (int i = 0; i < 3; i++) {
+        if (outs[i] != 0) {
+            MEM_W(0, outs[i]) = word(rdram, rotation + static_cast<uint32_t>(i) * 4);
+        }
+    }
+    return 1;
 }

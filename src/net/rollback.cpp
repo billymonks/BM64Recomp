@@ -12,6 +12,11 @@ constexpr uint8_t kHash = 2;
 constexpr uint8_t kBarrier = 3;
 constexpr uint8_t kPing = 4;
 constexpr size_t kPadBytes = 6;
+// type, player, load sequence, tick, simulated tick, confirmed tick.
+constexpr size_t kHeaderBytes = 20;
+// The gap between a peer's confirmed tick and our newest input is bounded by twice
+// (max_rollback + input_delay). This only guards against a peer that never reports.
+constexpr uint64_t kMaxResend = 64;
 
 void write_u16(uint8_t* p, uint16_t v) {
     p[0] = static_cast<uint8_t>(v);
@@ -79,29 +84,68 @@ Session::Session(Config config, Transport& transport)
     if (config_.max_rollback < 1) {
         config_.max_rollback = 1;
     }
+    // No machine samples a pad for the first input_delay ticks. Every peer plays them with the
+    // empty pad, so they count as received and the confirmed prefix can start at tick 0.
+    for (int player = 0; player < config_.player_count; player++) {
+        inputs_[player].resize(static_cast<size_t>(config_.input_delay));
+        for (Stored& stored : inputs_[player]) {
+            stored.known = true;
+        }
+    }
+}
+
+bool Session::tick_final(uint64_t tick) const {
+    for (int player = 0; player < config_.player_count; player++) {
+        const auto& row = inputs_[player];
+        const auto& used = used_[player];
+        if (tick >= row.size() || !row[static_cast<size_t>(tick)].known) {
+            return false;
+        }
+        if (tick >= used.size() || !used[static_cast<size_t>(tick)].simulated) {
+            return false;
+        }
+        if (used[static_cast<size_t>(tick)].pad != row[static_cast<size_t>(tick)].pad) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void Session::advance_confirmed() {
+    while (confirmed_ < simulated_ && tick_final(confirmed_)) {
+        confirmed_++;
+    }
 }
 
 void Session::send_raw(uint8_t type, uint64_t tick, const uint8_t* payload, size_t size) {
-    uint8_t header[16];
+    uint8_t header[kHeaderBytes];
     header[0] = type;
     header[1] = static_cast<uint8_t>(config_.local_player);
     write_u16(header + 2, static_cast<uint16_t>(load_seq_));
     write_u64(header + 4, tick);
     write_u32(header + 12, static_cast<uint32_t>(simulated_));
-    std::vector<uint8_t> packet(16 + size);
-    std::memcpy(packet.data(), header, 16);
+    write_u32(header + 16, static_cast<uint32_t>(confirmed_));
+    std::vector<uint8_t> packet(kHeaderBytes + size);
+    std::memcpy(packet.data(), header, kHeaderBytes);
     if (size > 0) {
-        std::memcpy(packet.data() + 16, payload, size);
+        std::memcpy(packet.data() + kHeaderBytes, payload, size);
     }
     transport_.send(packet.data(), packet.size());
 }
 
 void Session::send_inputs() {
-    // Retransmit the recent window so a dropped packet still arrives before the rollback limit.
-    uint64_t begin = simulated_ > static_cast<uint64_t>(config_.max_rollback + config_.input_delay)
-        ? simulated_ - static_cast<uint64_t>(config_.max_rollback + config_.input_delay)
-        : 0;
+    // Resend everything since the slowest peer's confirmed tick. That peer is still missing at least
+    // one of those inputs, and a window that followed only our own clock could pass it by for good.
     auto& mine = inputs_[config_.local_player];
+    uint64_t begin = mine.size();
+    for (int player = 0; player < config_.player_count; player++) {
+        if (player != config_.local_player) {
+            begin = std::min(begin, peer_confirmed_[player]);
+        }
+    }
+    if (mine.size() > kMaxResend) {
+        begin = std::max(begin, static_cast<uint64_t>(mine.size() - kMaxResend));
+    }
     for (uint64_t tick = begin; tick < mine.size(); tick++) {
         if (!mine[static_cast<size_t>(tick)].known) {
             continue;
@@ -129,7 +173,7 @@ void Session::recv_all() {
     uint8_t buf[64];
     for (;;) {
         int n = transport_.recv(buf, sizeof(buf));
-        if (n < 16) {
+        if (n < static_cast<int>(kHeaderBytes)) {
             break;
         }
         uint8_t type = buf[0];
@@ -137,18 +181,21 @@ void Session::recv_all() {
         uint32_t seq = read_u16(buf + 2);
         uint64_t tick = read_u64(buf + 4);
         uint64_t remote_sim = read_u32(buf + 12);
-        note_peer(player, seq, remote_sim);
-        if (type == kInput && n >= 16 + static_cast<int>(kPadBytes)) {
-            note_remote(player, tick, decode_pad(buf + 16));
+        uint64_t remote_confirmed = read_u32(buf + 16);
+        note_peer(player, seq, remote_sim, remote_confirmed);
+        const uint8_t* body = buf + kHeaderBytes;
+        int body_size = n - static_cast<int>(kHeaderBytes);
+        if (type == kInput && body_size >= static_cast<int>(kPadBytes)) {
+            note_remote(player, tick, decode_pad(body));
         }
-        else if (type == kHash && n >= 24) {
-            uint64_t remote_hash = read_u64(buf + 16);
+        else if (type == kHash && body_size >= 8) {
+            uint64_t remote_hash = read_u64(body);
             remember_remote_hash(tick, remote_hash);
         }
     }
 }
 
-void Session::note_peer(int player, uint32_t seq, uint64_t remote_sim) {
+void Session::note_peer(int player, uint32_t seq, uint64_t remote_sim, uint64_t remote_confirmed) {
     if (player < 0 || player >= config_.player_count || player == config_.local_player) {
         return;
     }
@@ -156,6 +203,9 @@ void Session::note_peer(int player, uint32_t seq, uint64_t remote_sim) {
     peer_heard_[player] = simulated_;
     if (remote_sim > peer_sim_[player]) {
         peer_sim_[player] = remote_sim;
+    }
+    if (remote_confirmed > peer_confirmed_[player]) {
+        peer_confirmed_[player] = remote_confirmed;
     }
     if (seq > peer_load_seq_[player]) {
         peer_load_seq_[player] = seq;
@@ -279,6 +329,7 @@ bool Session::poll(Step& step, bool& stall, const std::function<void(uint64_t ti
         return false;
     }
     barrier_open_ = false;
+    advance_confirmed();
 
     if (!resim_ && slowest_peer() + static_cast<uint64_t>(config_.max_frame_advantage) < simulated_ && stalls_ < 8 && simulated_ > 0) {
         stalls_++;
@@ -287,6 +338,14 @@ bool Session::poll(Step& step, bool& stall, const std::function<void(uint64_t ti
     }
     stalls_ = 0;
     step.loaded = false;
+
+    // A guess older than max_rollback can no longer be corrected, so stop predicting until
+    // the oldest unconfirmed tick is inside the window again.
+    if (!resim_ && rollback_target() < 0 && simulated_ >= confirmed_ + static_cast<uint64_t>(config_.max_rollback)) {
+        window_stalls_++;
+        stall = true;
+        return false;
+    }
 
     if (!resim_) {
         int target = rollback_target();
@@ -306,14 +365,10 @@ bool Session::poll(Step& step, bool& stall, const std::function<void(uint64_t ti
     }
 
     uint64_t tick = simulated_;
-    bool any_predicted = false;
     FrameInput input;
-    for (int player = 0; player < kMaxPlayers; player++) {
+    for (int player = 0; player < config_.player_count; player++) {
         bool predicted = false;
-        if (player < config_.player_count) {
-            input.player[player] = pad_for(player, tick, predicted);
-            any_predicted = any_predicted || predicted;
-        }
+        input.player[player] = pad_for(player, tick, predicted);
     }
 
     bool last_resim = resim_ && simulated_ + 1 >= resim_until_;
@@ -323,7 +378,6 @@ bool Session::poll(Step& step, bool& stall, const std::function<void(uint64_t ti
     // Intermediate corrections already had their sounds stopped on load. Starting them again
     // for every tick in the window stacks the whole window into one displayed frame.
     step.speculative = resim_ && !last_resim;
-    step.confirmed = !any_predicted;
     step.accept_sample = tick >= furthest_;
     for (int player = 0; player < config_.player_count; player++) {
         auto& used = used_[player];
@@ -333,13 +387,14 @@ bool Session::poll(Step& step, bool& stall, const std::function<void(uint64_t ti
         used[static_cast<size_t>(tick)].simulated = true;
         used[static_cast<size_t>(tick)].pad = input.player[player];
     }
-    if (!any_predicted && tick + 1 > confirmed_) {
-        confirmed_ = tick + 1;
-    }
     if (tick + 1 > furthest_) {
         furthest_ = tick + 1;
     }
     simulated_ = tick + 1;
+    advance_confirmed();
+    // Final only when every earlier tick also ran on received input. A tick whose own inputs
+    // arrived while an earlier one was still a guess will be resimulated and must not be hashed.
+    step.confirmed = tick < confirmed_;
     if (last_resim) {
         resim_ = false;
     }
