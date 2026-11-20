@@ -117,7 +117,17 @@ namespace {
         uint16_t button = 0;
         int8_t stick_x = 0;
         int8_t stick_y = 0;
+        // BM64_DIRECTOR_MENU: presses that replace the menu A pulses until the last one.
+        struct MenuPress {
+            uint64_t tick;
+            uint16_t buttons;
+            int8_t stick_x;
+            int8_t stick_y;
+        };
+        std::vector<MenuPress> menu;
     } director;
+    constexpr uint64_t menu_press_ticks = 3;
+    constexpr int32_t battle_setup_overlay = 13;
 
     constexpr uint32_t level_loader = 0x802AC5D0;
     constexpr uint32_t next_scene = 0x802AC5D4;
@@ -279,6 +289,26 @@ namespace {
                 director.rng = parsed;
             }
         }
+        if (const char* menu = env("BM64_DIRECTOR_MENU")) {
+            for (const std::string& item : split(menu, ',')) {
+                std::vector<std::string> parts = split(item, ':');
+                uint32_t buttons = 0;
+                if ((parts.size() == 2 || parts.size() == 4) && parse_hex(parts[1], buttons) && buttons <= 0xFFFF) {
+                    Director::MenuPress press{ std::strtoull(parts[0].c_str(), nullptr, 10), static_cast<uint16_t>(buttons), 0, 0 };
+                    if (parts.size() == 4) {
+                        press.stick_x = static_cast<int8_t>(std::clamp(std::atoi(parts[2].c_str()), -80, 80));
+                        press.stick_y = static_cast<int8_t>(std::clamp(std::atoi(parts[3].c_str()), -80, 80));
+                    }
+                    director.menu.push_back(press);
+                }
+                else {
+                    fprintf(stderr, "[bm64 director] Ignoring menu press %s (expected tick:hexbuttons[:x:y])\n", item.c_str());
+                }
+            }
+            std::sort(director.menu.begin(), director.menu.end(),
+                [](const Director::MenuPress& a, const Director::MenuPress& b) { return a.tick < b.tick; });
+            printf("[bm64 director] %zu scripted menu presses; arenas wait for Battle setup instead of jumping\n", director.menu.size());
+        }
         director.on = !director.scenes.empty();
         if (director.on) {
             printf("[bm64 director] %zu scenes, %llu ticks each after %llu boot ticks, seed %08X\n",
@@ -305,9 +335,24 @@ namespace {
         // Banks 1-3 are boot and menus: pulse A with the stick centred, so B never backs out.
         bool menu = last_overlay >= 1 && last_overlay <= 17;
         uint16_t button = menu ? ((state.tick % 30) < 2 ? 0x8000 : 0) : director.button;
+        int8_t stick_x = menu ? 0 : director.stick_x;
+        int8_t stick_y = menu ? 0 : director.stick_y;
+        bool scripted = !director.menu.empty() && state.tick <= director.menu.back().tick + menu_press_ticks;
+        if (scripted) {
+            button = 0;
+            stick_x = 0;
+            stick_y = 0;
+            for (const Director::MenuPress& press : director.menu) {
+                if (state.tick >= press.tick && state.tick < press.tick + menu_press_ticks) {
+                    button = press.buttons;
+                    stick_x = press.stick_x;
+                    stick_y = press.stick_y;
+                }
+            }
+        }
         MEM_H(0, pads) = static_cast<int16_t>(button);
-        MEM_B(2, pads) = menu ? 0 : director.stick_x;
-        MEM_B(3, pads) = menu ? 0 : director.stick_y;
+        MEM_B(2, pads) = stick_x;
+        MEM_B(3, pads) = stick_y;
         MEM_B(4, pads) = 0;
         for (uint32_t port = 1; port < num_ports; port++) {
             MEM_H(port * pad_size + 0, pads) = 0;
@@ -323,7 +368,14 @@ namespace {
             uint8_t scene = director.scenes[director.index];
             bool arena = scene >= first_arena_scene && scene <= last_arena_scene;
             uint32_t loader = read_u32(rdram, level_loader);
-            if ((loader & 1) == 0 && read_u32(rdram, scene_lock) == 0) {
+            if (arena && !director.menu.empty()) {
+                if (!scripted && last_overlay == battle_setup_overlay) {
+                    printf("[bm64 director] Tick %llu: scene %02X (reached Battle setup through the menus)\n",
+                        (unsigned long long)state.tick, scene);
+                    director.index++;
+                }
+            }
+            else if ((loader & 1) == 0 && read_u32(rdram, scene_lock) == 0) {
                 printf("[bm64 director] Tick %llu: scene %02X%s\n", (unsigned long long)state.tick, scene,
                     arena ? " (through battle setup)" : "");
                 director.index++;

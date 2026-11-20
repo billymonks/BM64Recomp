@@ -259,7 +259,7 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
   - Done when: save plus load takes under 1 ms, and resimulating 8 ticks takes under 8 ms on a mid-range PC.
   - Note: ring of 16. Measured save 336 µs + load 243 µs. 8 ticks at 717 µs is about 5.7 ms. The machine is an RTX 3090, not a mid-range PC.
   - Note (audit, 2026-11-19): ticked while its dependency 3.6 was still open. The ring itself works. 3.6 was listened to and ticked later the same day. The ring size caps the rollback window: `BM64_NET_ROLLBACK` is clamped to 12 so a rollback never reaches a snapshot the ring has overwritten.
-- [ ] **3.8 SyncTest mode**
+- [x] **3.8 SyncTest mode**
   - Depends on: 3.7.
   - Work: a debug mode that runs every tick as save, step, load, step, compare hashes (like GGPO's SyncTest), with a configurable rollback depth.
   - Done when: an automated director recording of every Battle arena and every story stage (one fresh boot per scene, `tools/run-synctest-scenes.ps1`) runs its full length and passes SyncTest at depths 1 and 12. Every mismatch is fixed or documented. Boss fights and stage clears are not reachable this way; the co-op playthrough recordings (6.14–6.19) cover them.
@@ -286,20 +286,20 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
     - The sub-overlay table `0x8019C0D0` is rewritten on every bank load and read by the overlay loader, so `0x8019B0D0`–`0x8019C2E0` is now in the snapshot and the `files` hash.
     - A SyncTest rerun that reuses stored pads did not apply the director's scene command. It does now.
     - Scene `0x2E` needs entry `0x12`; `0x7A` and `0x7D` are not stages (section 2).
-  - Open: 5 of the 10 arenas stop early because the game heap returns 0 for a small file (section 2, "Heap exhaustion in Battle"). SyncTest passed on every tick they reached. The done-when needs full-length runs, so 3.8 stays open until that is fixed or shown to be a director-only effect.
+  - Note (2026-11-20, later): the early stops in arenas 2, 3, 5, 7 and 9 came from the director warping from the title straight into Battle setup (section 2, "Heap exhaustion in Battle"). Reaching Battle setup through the title and main menu instead (`BM64_DIRECTOR_MENU`, `run-synctest-scenes.ps1 -ArenaMenus`) runs all 10 arenas to the end. Arena results below are from `runs/st/fin_nat1` and `fin_nat2` (`-Secs 35 -ArenaMenus`): 3201 ticks each, about 1755 of them in the arena, `speculative starts 0`. Arena 8 finished a round and went to stage select (overlay 17) and back.
 
     | recording | overlay ids | ticks | depth 1 | depth 12 | result |
     |---|---|---|---|---|---|
-    | arena 1 (`0x90`) | 86 | 2401 | pass | pass | full length |
-    | arena 2 (`0x91`) | 87 (409 ticks) | 1380 | pass | pass | heap failure, file `0x119` |
-    | arena 3 (`0x92`) | 88 (469 ticks) | 1440 | pass | pass | heap failure, file `0x11E` |
-    | arena 4 (`0x93`) | 89 | 2401 | pass | pass | full length |
-    | arena 5 (`0x94`) | 90 (491 ticks) | 1440 | pass | pass | heap failure, file `0x11E` |
-    | arena 6 (`0x95`) | 91 | 2401 | pass | pass | full length |
-    | arena 7 (`0x96`) | 92 (649 ticks) | 1620 | pass | pass | heap failure, file `0x11E` |
-    | arena 8 (`0x97`) | 93 | 2401 | pass | pass | full length |
-    | arena 9 (`0x98`) | 94 (889 ticks) | 1860 | pass | pass | heap failure, file `0x124`; full length in the two earlier runs |
-    | arena 10 (`0x99`) | 95 | 2401 | pass | pass | full length |
+    | arena 1 (`0x90`) | 11, 9, 13, 86 | 3201 | pass | pass | full length |
+    | arena 2 (`0x91`) | 11, 9, 13, 87 | 3201 | pass | pass | full length |
+    | arena 3 (`0x92`) | 11, 9, 13, 88 | 3201 | pass | pass | full length |
+    | arena 4 (`0x93`) | 11, 9, 13, 89 | 3201 | pass | pass | full length |
+    | arena 5 (`0x94`) | 11, 9, 13, 90 | 3201 | pass | pass | full length |
+    | arena 6 (`0x95`) | 11, 9, 13, 91 | 3201 | pass | pass | full length |
+    | arena 7 (`0x96`) | 11, 9, 13, 92 | 3201 | pass | pass | full length |
+    | arena 8 (`0x97`) | 11, 9, 13, 93, 17, 93 | 3201 | pass | pass | full length |
+    | arena 9 (`0x98`) | 11, 9, 13, 94 | 3201 | pass | pass | full length |
+    | arena 10 (`0x99`) | 11, 9, 13, 95 | 3201 | pass | pass | full length |
     | bank 4: `28`–`31` (10 stages) | 18–27 | 1801 each | pass | pass | full length |
     | bank 5: `38`–`3E` (7) | 28–34 | 1801 each | pass | pass | full length |
     | bank 6: `48`–`56` (15) | 35–49 | 1801 each | pass | pass | full length |
@@ -307,7 +307,7 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
     | bank 8: `68`–`74` (13) | 60–72 | 1801 each | pass | pass | full length |
     | bank 9: `78`, `79`, `7B`, `7C`, `7E`, `62` (6) | 73–78 | 1801 each | pass | pass | full length |
 
-    Not ticked. Step 1 has no per-arena recording and no full story world.
+    Ticked 2026-11-20: every arena and every story stage row passes at full length at depths 1 and 12, under the reworded done-when. Steps 1 and 2 (hand recordings) were replaced by the director runs; boss fights and stage clears are covered by 6.14–6.19.
 - [ ] **3.9 Player quicksave (optional)**
   - Depends on: 3.7.
   - Work: user-facing quicksave/quickload built on 3.7. Same session only; native stacks aren't portable across runs.
@@ -901,7 +901,7 @@ Every design below has been decided. If the code turns out to differ from what a
 
 Hand these over as numbered steps. Don't run them yourself without asking. Each one gives a pass or fail line to look for.
 
-- **SyncTest in Battle (3.8).** The user records about 3 minutes of a 4-player Battle with real pads: `$env:BM64_RECORD = "battle1.bm64rec"; .\build\BM64Recompiled.exe`. Then `$env:BM64_SYNCTEST = "1"; .\tools\run-replay.ps1 -Replay battle1.bm64rec -Out st_battle1`. Pass: no `BM64 SYNCTEST FAIL` line. Repeat on at least three arenas, then one full story world.
+- **SyncTest in Battle (3.8).** The user records about 3 minutes of a 4-player Battle with real pads: `$env:BM64_RECORD = "battle1.bm64rec"; .\build\BM64Recompiled.exe`. Then `$env:BM64_SYNCTEST = "1"; .\tools\run-replay.ps1 -Replay battle1.bm64rec -Out st_battle1`. Pass: no `BM64 SYNCTEST FAIL` line. Repeat on at least three arenas, then one full story world. No longer needed for 3.8 (done with director runs, 2026-11-20); still useful as a real-pad, multi-player check.
 - **Loopback Battle with scripted input (4.2).** Two terminals:
   - Host: `$env:BM64_NET = "host"; $env:BM64_NET_SAMPLE = "script"; $env:BM64_NET_LAG_MS = "50"; .\build\BM64Recompiled.exe`
   - Guest: the same with `$env:BM64_NET = "guest"`.

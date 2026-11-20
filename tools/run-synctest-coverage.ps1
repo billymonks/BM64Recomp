@@ -15,6 +15,8 @@ param(
     [int]$Secs = 30,
     [int[]]$Depths = @(1, 12),
     [string]$Seed = "",
+    [string]$Menu = "",
+    [int]$BootTicks = 600,
     [switch]$SkipRecord
 )
 
@@ -25,9 +27,12 @@ try {
     New-Item -ItemType Directory -Force $Out | Out-Null
     $rec = Join-Path $Out "rec.bm64rec"
     if (-not $SkipRecord) {
-        $director = @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-director.ps1"), "-Scenes", $Scenes, "-Secs", "$Secs", "-Out", $Out)
+        $director = @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-director.ps1"), "-Scenes", $Scenes, "-Secs", "$Secs", "-BootTicks", "$BootTicks", "-Out", $Out)
         if ($Seed -ne "") {
             $director += @("-Seed", $Seed)
+        }
+        if ($Menu -ne "") {
+            $director += @("-Menu", $Menu)
         }
         & powershell @director | Out-Host
     }

@@ -15,6 +15,7 @@ param(
     [int]$Secs = 60,
     [int]$BootTicks = 600,
     [string]$Seed = "",
+    [string]$Menu = "",
     [string]$Exe = "build\BM64Recompiled.exe",
     [int]$TimeoutSec = 0
 )
@@ -39,6 +40,7 @@ try {
     $env:BM64_DIRECTOR_SECS = "$Secs"
     $env:BM64_DIRECTOR_BOOT = "$BootTicks"
     $env:BM64_DIRECTOR_SEED = $Seed
+    $env:BM64_DIRECTOR_MENU = $Menu
 
     $p = Start-Process -FilePath (Resolve-Path $Exe).Path -WorkingDirectory $Repo -PassThru `
         -RedirectStandardOutput (Join-Path $outFull "stdout.txt") -RedirectStandardError (Join-Path $outFull "stderr.txt")
@@ -56,7 +58,7 @@ try {
     Write-Host "Recording finished (exit code $script:RunExit): $env:BM64_RECORD"
 }
 finally {
-    foreach ($v in "BM64_AUTOSTART", "BM64_SANDBOX", "BM64_RECORD", "BM64_HASH_LOG", "BM64_DIRECTOR", "BM64_DIRECTOR_SECS", "BM64_DIRECTOR_BOOT", "BM64_DIRECTOR_SEED") {
+    foreach ($v in "BM64_AUTOSTART", "BM64_SANDBOX", "BM64_RECORD", "BM64_HASH_LOG", "BM64_DIRECTOR", "BM64_DIRECTOR_SECS", "BM64_DIRECTOR_BOOT", "BM64_DIRECTOR_SEED", "BM64_DIRECTOR_MENU") {
         Remove-Item "Env:$v" -ErrorAction SilentlyContinue
     }
     Pop-Location

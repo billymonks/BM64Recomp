@@ -30,6 +30,8 @@
 //   BM64_DIRECTOR=<hex list>  with BM64_RECORD: seeded random input on port 0 and a timed request for each
 //                             scene (arenas through Battle setup). BM64_DIRECTOR_SECS per scene (60),
 //                             BM64_DIRECTOR_BOOT ticks before the first (600), BM64_DIRECTOR_SEED (hex)
+//   BM64_DIRECTOR_MENU=<list> scripted port 0 presses "tick:hexbuttons[:x:y]" before the random input; arenas
+//                             then wait for Battle setup instead of warping (game-internals section 13)
 //   BM64_SYNCTEST_DUMP=<dir>  on a SyncTest mismatch, write the window's forward images and the rerun image
 //   BM64_SYNCTEST=<n>         savestate SyncTest, read in src/game/bm64_state.cpp. Unset or 0 is off.
 //                             1 (or any other non-numeric text) rolls back one tick. 2..12 roll back
