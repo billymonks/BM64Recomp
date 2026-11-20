@@ -893,9 +893,10 @@ typedef struct Player {
 #define g_Players ((Player*)0x80F00000)
 extern u32 D_802AC624; // lives
 
-// Same word the ROM getter loads. Co-op can override it per process; the default reads this word.
+// Same word the ROM getter loads. In a co-op session the caller's return address picks the
+// category (src/game/bm64_player_sites.inc); with no session this word is returned unchanged.
 RECOMP_PATCH s32 func_80243DDC(void) {
-    return bm64_main_player();
+    return bm64_main_player((u32)__builtin_return_address(0));
 }
 extern u32 D_802AC628; // credits
 

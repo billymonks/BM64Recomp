@@ -5,12 +5,6 @@
     { 0, 0x80235D7Cu, 1 }, // func_80235D7C: camera
     { 0, 0x80237664u, 1 }, // func_80237664: camera
     { 0, 0x8023F26Cu, 4 }, // func_8023F26C: cutscene or script
-    { 0, 0x802506B8u, 3 }, // func_802506B8: trigger or goal
-    { 0, 0x80250DC8u, 3 }, // func_80250DC8: trigger or goal
-    { 0, 0x80250E2Cu, 3 }, // func_80250E2C: trigger or goal
-    { 0, 0x802510C8u, 3 }, // func_802510C8: trigger or goal
-    { 0, 0x802512C0u, 3 }, // func_802512C0: trigger or goal
-    { 0, 0x802512F8u, 3 }, // func_802512F8: trigger or goal
     { 0, 0x802553D4u, 4 }, // func_802553D4: cutscene or script
     { 0, 0x8025DC60u, 4 }, // func_8025DC60: cutscene or script
     { 7, 0x8004374Cu, 4 }, // func_ovl2_3_8004374C: cutscene or script

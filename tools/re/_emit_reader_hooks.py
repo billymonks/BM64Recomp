@@ -43,12 +43,12 @@ def main():
     if MARKER in text:
         raise SystemExit("hooks already appended")
     parts = [MARKER, "# The load of D_802AC894 has already executed. The register becomes the",
-             "# per-process slot. With no session that is the word the load just read."]
+             "# slot for that lw (site table, then process entry). With no session that is the word the load just read."]
     out = ["", *parts]
     for addr, func, reg in SITES:
         out.append(hook(func, addr, [
-            "    extern int bm64_resolved_slot(uint8_t* rdram);",
-            f"    ctx->r{reg} = (int64_t)(int32_t)bm64_resolved_slot(rdram);",
+            "    extern int bm64_resolved_slot_at(uint8_t* rdram, uint32_t site);",
+            f"    ctx->r{reg} = (int64_t)(int32_t)bm64_resolved_slot_at(rdram, 0x{addr - 4:08X}u);",
         ]))
     out.append(hook("func_80235D7C", 0x80235E08, [
         "    extern void bm64_camera_enter(uint8_t* rdram);",

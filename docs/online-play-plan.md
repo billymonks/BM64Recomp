@@ -588,7 +588,7 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     3. [agent] Override test hook: `BM64_COOP_OVERRIDE=<category>:<slot>` (for example `camera:1`) writes the override byte for that category at boot of a local co-op session. The overrides live at `0x80F00820`, one per category, `0xFF` meaning none.
     4. [user] `BM64_COOP_LOCAL=2 BM64_COOP_OVERRIDE=enemy:1` in a stage with enemies: every enemy should chase player 2. Then `enemy:0`: they chase player 1.
     5. Tick when steps 2 and 4 pass.
-  - Note: with no session, `bm64_main_player()` returns `D_802AC894`, so single-player replays stay on the hero. In a session the running process is looked up in `bm64_player_cats.inc`. Enemy and trigger entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot.
+  - Note: with no session, `bm64_main_player(caller)` returns `D_802AC894`, so single-player replays stay on the hero. In a session the call site is looked up in `bm64_player_sites.inc`, and an unlisted site falls back to the running process in `bm64_player_cats.inc` (queue item 4, 2026-11-20). Enemy and trigger entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot.
   - Note (2026-11-19): the 22 direct `lw`s of `D_802AC894` (every reader except the patched getter) are hooks that store `bm64_resolved_slot` into the register the load just wrote. The three `sw`s and `func_80245868`'s address calculation stay writers. With no session the function returns that word, so the register does not change. `func_80236F54` is treated as a camera process even though it has no catalogue row. After replay started rewriting `0x802AC400` from the ports the file uses, two replays of `test.bm64rec` matched on all 9,591 ticks in every range, and the save was unchanged. A third pass with `BM64_CAMERA_BIAS` still differs in `bss` and `heap`, which is the lookAt matrix and the camera process stack from phase 2.5.
 - [ ] **6.5 Per-player cameras**
   - Depends on: 6.4.
@@ -622,6 +622,7 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     4. [user] For each boss, in local co-op with 2 players: player 1 stays far away and player 2 stands near the boss. The boss should attack player 2. Then swap roles.
     5. [agent] A boss that ignores the nearer player has its targeting in code that's still keyed to slot 0. Find its reads in that overlay with the catalogue output and step 2, and add the missing sites.
     6. Tick when every boss row is "yes".
+  - Note (2026-11-20): step 1 is done. Enemy calls in helpers are now matched by call site (292 rows in `bm64_player_sites.inc`).
   - Note: while a session is running, `getMainPlayer` from a process whose entry is classified as enemy or boss picks the nearest living human or AI bomber and keeps that slot for 60 ticks. The choice is stored per process at `0x80F00780`. The origin is the process `user_data` object when that pointer has a body, otherwise the leader. Ties take the lowest slot. Not watched in a stage, and not tuned per boss.
 - [ ] **6.7 Triggers and stage clear**
   - Depends on: 6.4.
@@ -634,7 +635,8 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     4. [agent] Don't change `D_802AC894` when someone else clears the stage. Camera block 0, the port map and checkpoints all assume the leader stays slot 0.
     5. [user] For each stage in `docs/coop-map-checklist.md`: player 1 waits at the start while player 2 reaches the goal. Pass: the stage clears for both.
     6. Tick when every stage row passes.
-  - Note (2026-11-19): a process whose entry is one of the six trigger functions resolves the main player through the same sticky nearest-living-bomber rule as an enemy. That is the read side of "any player". The goal's own distance test was not rewritten, and the canonical word `D_802AC894` is not changed to the player who touched it. Not watched in a stage.
+  - Note (2026-11-20, replaces the 2026-11-19 note): the six main-code "trigger" functions turned out to be hero routines that act on the bomber they read, so their sites now resolve to the leader (queue item 4). No call site is in the trigger category yet; step 2 must find the goal test first.
+  - Old note (2026-11-19): a process whose entry is one of the six trigger functions resolves the main player through the same sticky nearest-living-bomber rule as an enemy. The goal's own distance test was not rewritten, and the canonical word `D_802AC894` is not changed to the player who touched it. Not watched in a stage.
   - Note (audit, 2026-11-19): this rule cannot fire. The catalogue records the function that contains each call, but the resolver looks up the running process's entry function. The six trigger functions are only reached by `jal` from other code, never as a process entry, so no process ever matches them. Queue item 4 keys the lookup on the call site instead, which also fixes enemies whose `getMainPlayer` call sits in a helper.
 - [ ] **6.8 Map transitions and checkpoints**
   - Depends on: 6.7.
@@ -899,6 +901,14 @@ Every design below has been decided. If the code turns out to differ from what a
   - if a function checks "is the player at the goal", it stays "trigger" (nearest living bomber).
 
 **Tests.** No session test applies. Run `python tools/re/catalogue_main_player.py --emit` and check the site count (626). Then, with no session, confirm two replays still match (see item 6): with no session the resolver must return `D_802AC894` unchanged.
+
+**Done (2026-11-20), except the replay check.**
+- `catalogue_main_player.py --emit` reports 626 call sites in 312 functions and writes `src/game/bm64_player_sites.inc` with 300 rows: 292 enemy or boss, 2 camera, and the 6 hero-routine sites forced to other. Only rows that differ from "other" are written, plus those 6, because an unlisted site already falls back to the process entry. The six functions are no longer rows in `bm64_player_cats.inc`.
+- Trigger semantics: all six act on the bomber they read (goal or warp sequence, table reset, animation state, grid placement, slot position; details in "Main-player sequences" in `game-internals.md`). None tests whether the player reached the goal, so all six are "other". The goal test is in the stage overlays and is still 6.7 step 2.
+- The patched getter passes `__builtin_return_address(0)`. The recompiled patch begins `ctx->r4 = ctx->r31` before calling `bm64_main_player`, so the argument is the caller's return address. Overlay calls reach the getter through `exec_zerojmp_func`, which does not write `r31`, so overlay sites keep their own address.
+- The 22 direct-read hooks call `bm64_resolved_slot_at(rdram, <lw address>)` (scripted edit of the toml block; `_emit_reader_hooks.py` emits the same text). After `-Regen`, all 22 are in `RecompiledFuncs` and no `bm64_resolved_slot(` call is left.
+- `BM64_LOG_MAIN_CALLERS=1` prints the return addresses of the first ten `getMainPlayer` calls.
+- Not run: the two no-session replays of `test.bm64rec`. Listed with the other "ask first" checks.
 
 ### 5. Local co-op mode (enables all phase 6 testing)
 

@@ -5,6 +5,7 @@
 #include "librecomp/helpers.hpp"
 #include "recomp.h"
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstdio>
@@ -131,6 +132,23 @@ int category_of(int overlay, uint32_t func) {
     return 0;
 }
 
+// Category of one getMainPlayer return address or direct-read lw, or -1 when the site is not listed.
+int category_of_site(int overlay, uint32_t site) {
+    struct Row { uint16_t overlay; uint32_t site; uint8_t category; };
+    static const Row rows[] = {
+#include "bm64_player_sites.inc"
+    };
+    uint16_t key_overlay = site >= 0x80200000u ? 0 : static_cast<uint16_t>(overlay);
+    const Row* end = rows + sizeof(rows) / sizeof(rows[0]);
+    const Row* it = std::lower_bound(rows, end, Row{ key_overlay, site, 0 }, [](const Row& a, const Row& b) {
+        return a.overlay < b.overlay || (a.overlay == b.overlay && a.site < b.site);
+    });
+    if (it != end && it->overlay == key_overlay && it->site == site) {
+        return it->category;
+    }
+    return -1;
+}
+
 int nearest_living(uint8_t* rdram, float ox, float oy, float oz, bool have_origin) {
     int best = -1;
     float best_d = 0;
@@ -154,14 +172,18 @@ int nearest_living(uint8_t* rdram, float ox, float oy, float oz, bool have_origi
 
 int sticky_target(uint8_t* rdram);
 
-int resolved_slot(uint8_t* rdram) {
+// `site` is the caller's return address for getMainPlayer, or the lw address for a direct read.
+int resolved_slot(uint8_t* rdram, uint32_t site) {
     int slot = word(rdram, 0x802AC894u);
     if (!story()) {
         return slot;
     }
-    uint32_t proc = static_cast<uint32_t>(word(rdram, 0x802AC344u));
-    uint32_t func = (proc & 0xFF000000u) == 0x80000000u ? static_cast<uint32_t>(word(rdram, proc + 0x0C)) : 0;
-    int category = category_of(sess().overlay, func);
+    int category = category_of_site(sess().overlay, site);
+    if (category < 0) {
+        uint32_t proc = static_cast<uint32_t>(word(rdram, 0x802AC344u));
+        uint32_t func = (proc & 0xFF000000u) == 0x80000000u ? static_cast<uint32_t>(word(rdram, proc + 0x0C)) : 0;
+        category = category_of(sess().overlay, func);
+    }
     if (category < 0 || category >= bm64::coop::kCategories) {
         return slot;
     }
@@ -420,11 +442,20 @@ void apply_rules(uint8_t* rdram) {
 } // namespace bm64::coop
 
 extern "C" void bm64_main_player(uint8_t* rdram, recomp_context* ctx) {
-    _return(ctx, resolved_slot(rdram));
+    uint32_t caller = _arg<0, uint32_t>(rdram, ctx);
+    static const bool log_callers = std::getenv("BM64_LOG_MAIN_CALLERS") != nullptr;
+    if (log_callers) {
+        static int logged = 0;
+        if (logged < 10) {
+            logged++;
+            std::printf("[bm64 coop] getMainPlayer caller %08X\n", caller);
+        }
+    }
+    _return(ctx, resolved_slot(rdram, caller));
 }
 
-extern "C" int bm64_resolved_slot(uint8_t* rdram) {
-    return resolved_slot(rdram);
+extern "C" int bm64_resolved_slot_at(uint8_t* rdram, uint32_t site) {
+    return resolved_slot(rdram, site);
 }
 
 // func_80248148 is about to take the hearts==0 path. t0 holds the heart count.
