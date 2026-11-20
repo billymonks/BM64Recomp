@@ -2,6 +2,7 @@
 
 #include "recomp.h"
 #include "librecomp/overlays.hpp"
+#include "bm64_state.h"
 #include "zelda_config.h"
 #include "recomp_input.h"
 #include "recomp_ui.h"
@@ -201,6 +202,7 @@ extern "C" void recomp_load_overlays(uint8_t * rdram, recomp_context * ctx) {
     u32 size = _arg<2, u32>(rdram, ctx);
 
     load_overlays(rom, ram, size);
+    bm64::state::note_overlay_load(rom, ram, size);
 }
 
 extern "C" void recomp_high_precision_fb_enabled(uint8_t * rdram, recomp_context * ctx) {

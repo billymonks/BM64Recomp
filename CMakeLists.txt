@@ -202,6 +202,11 @@ add_custom_command(OUTPUT
                    DEPENDS ${CMAKE_SOURCE_DIR}/patches/patches.elf
 )
 
+# register_patches.cpp includes the generated patch function table. Without this, a patch edit that
+# moves functions links a stale table and the game fails with "Failed to find function".
+set_source_files_properties(${CMAKE_SOURCE_DIR}/src/main/register_patches.cpp PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/RecompiledPatches/recomp_overlays.inl)
+
 # Main executable
 add_executable(BM64Recompiled)
 

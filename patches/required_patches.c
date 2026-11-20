@@ -1443,6 +1443,10 @@ RECOMP_PATCH void *func_8026CE28(s32 fileID) {
         sp24 = func_80226604(fileID, 1);
         func_8022616C(&size, 4, 1, sp24);
         D_800A7F30[id].unk4 = func_802998EC(size); // malloc
+        if (D_800A7F30[id].unk4 == NULL) {
+            // The decompressor below then writes through a null pointer and the game faults.
+            recomp_printf("[func_8026CE28] Allocation failed: file 0x%X size 0x%X slot %d\n", fileID, size, id);
+        }
         func_80292BD0(sp24, D_800A7F30[id].unk4, size);
         func_80226368(sp24);
     }

@@ -262,7 +262,8 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
 - [ ] **3.8 SyncTest mode**
   - Depends on: 3.7.
   - Work: a debug mode that runs every tick as save, step, load, step, compare hashes (like GGPO's SyncTest), with a configurable rollback depth.
-  - Done when: SyncTest runs clean through every Battle arena and every story world. Fix or document every mismatch.
+  - Done when: an automated director recording of every Battle arena and every story stage (one fresh boot per scene, `tools/run-synctest-scenes.ps1`) runs its full length and passes SyncTest at depths 1 and 12. Every mismatch is fixed or documented. Boss fights and stage clears are not reachable this way; the co-op playthrough recordings (6.14–6.19) cover them.
+  - Reworded 2026-11-20 with the user: recording every arena and world by hand needed arenas the user had not unlocked.
   - Steps:
     1. [user] Record one file per Battle arena (bank 14 has 10 sub-overlays; check the debug overlay's "overlay" field to confirm which arena is loaded), 1–2 minutes each, with real input on at least two pads. Record one file per story world (banks 4–9), from the first stage to the boss. The 2.3 recordings count. Name them `st_<overlay>.bm64rec`.
     2. [agent, ask first] For each file: `$env:BM64_SYNCTEST = "1"; .\tools\run-replay.ps1 -Replay st_X.bm64rec -Out st_X -TimeoutSec 3600`. The number is the rollback depth (`1` is one tick, `12` is the session cap). Pass: no `BM64 SYNCTEST FAIL` line in the log, and exit code 0. A clean exit also prints `BM64 SYNCTEST PASS ticks N depth D`.
@@ -279,8 +280,32 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
     |---|---|---|---|---|
     | `test.bm64rec` | boot, then bank 4 sub-overlays 1 and 2 (the stage 4.1 recording). Overlay ids 11, 9, 16, 12, 18, 19. No bank 14. | 9591 | 1 and 12 | pass. The depth 1 and depth 12 hash logs match each other and the 3.6 SyncTest log. `speculative starts 0` |
     | `new.bm64rec` | boot, menus, bank 7 sub-overlay 1 (the stage 7.1 recording), then a menu. Overlay ids 11, 9, 16, 12, 50, 11. No bank 14. | 8838 | 1 and 12 | pass. The depth 1 and depth 12 hash logs match. `speculative starts 0` |
-    | `st_<arena>.bm64rec` | bank 14, one file per sub-overlay (10 arenas), two pads | | | not recorded |
-    | `st_<world>.bm64rec` | banks 4–9, one file per world, first stage through the boss | | | not recorded |
+  - Note (2026-11-20): director coverage, final build, `runs/st/fin_a2` (arenas, 30 s each) and `runs/st/fin_s1`–`fin_s3` (story, 20 s each). Every SyncTest pass checked every tick the recording reached, at depth 1 and at depth 12, with `speculative starts 0`. Fixed on the way:
+    - Depth 12, tick 626 (scene `0x90`): stack leftovers from sound code that reads audio-thread globals. Fixed by zeroing the process stack below the caller's `sp` when a sound entry point returns (`bm64_scrub_stack`, game-internals section 10).
+    - Depth 3 and up, tick 1893 (scene `0x98`): a rollback across an overlay change kept the newer overlay's recompiled functions mapped. The snapshot now keeps the mapped overlay and remaps it on restore (section 11, snapshot version 2).
+    - The sub-overlay table `0x8019C0D0` is rewritten on every bank load and read by the overlay loader, so `0x8019B0D0`–`0x8019C2E0` is now in the snapshot and the `files` hash.
+    - A SyncTest rerun that reuses stored pads did not apply the director's scene command. It does now.
+    - Scene `0x2E` needs entry `0x12`; `0x7A` and `0x7D` are not stages (section 2).
+  - Open: 5 of the 10 arenas stop early because the game heap returns 0 for a small file (section 2, "Heap exhaustion in Battle"). SyncTest passed on every tick they reached. The done-when needs full-length runs, so 3.8 stays open until that is fixed or shown to be a director-only effect.
+
+    | recording | overlay ids | ticks | depth 1 | depth 12 | result |
+    |---|---|---|---|---|---|
+    | arena 1 (`0x90`) | 86 | 2401 | pass | pass | full length |
+    | arena 2 (`0x91`) | 87 (409 ticks) | 1380 | pass | pass | heap failure, file `0x119` |
+    | arena 3 (`0x92`) | 88 (469 ticks) | 1440 | pass | pass | heap failure, file `0x11E` |
+    | arena 4 (`0x93`) | 89 | 2401 | pass | pass | full length |
+    | arena 5 (`0x94`) | 90 (491 ticks) | 1440 | pass | pass | heap failure, file `0x11E` |
+    | arena 6 (`0x95`) | 91 | 2401 | pass | pass | full length |
+    | arena 7 (`0x96`) | 92 (649 ticks) | 1620 | pass | pass | heap failure, file `0x11E` |
+    | arena 8 (`0x97`) | 93 | 2401 | pass | pass | full length |
+    | arena 9 (`0x98`) | 94 (889 ticks) | 1860 | pass | pass | heap failure, file `0x124`; full length in the two earlier runs |
+    | arena 10 (`0x99`) | 95 | 2401 | pass | pass | full length |
+    | bank 4: `28`–`31` (10 stages) | 18–27 | 1801 each | pass | pass | full length |
+    | bank 5: `38`–`3E` (7) | 28–34 | 1801 each | pass | pass | full length |
+    | bank 6: `48`–`56` (15) | 35–49 | 1801 each | pass | pass | full length |
+    | bank 7: `58`–`61` (10) | 50–59 | 1801 each | pass | pass | full length |
+    | bank 8: `68`–`74` (13) | 60–72 | 1801 each | pass | pass | full length |
+    | bank 9: `78`, `79`, `7B`, `7C`, `7E`, `62` (6) | 73–78 | 1801 each | pass | pass | full length |
 
     Not ticked. Step 1 has no per-arena recording and no full story world.
 - [ ] **3.9 Player quicksave (optional)**

@@ -51,6 +51,8 @@ before_vram = 0x8026C6C8
 text = """
     extern int bm64_sound_leave(int real_handle);
     ctx->r2 = (int64_t)bm64_sound_leave((int)ctx->r2);
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x20);
 """
 
 [[patches.hook]]
@@ -73,6 +75,8 @@ before_vram = 0x8026C628
 text = """
     extern int bm64_sound_leave(int real_handle);
     ctx->r2 = (int64_t)bm64_sound_leave((int)ctx->r2);
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x50);
 """
 
 [[patches.hook]]
@@ -345055,3 +345059,129 @@ text = """
     if (bm64_camera_rotation(rdram, ctx)) { return; }
 """
 # END bm64 co-op ports and movement camera
+
+# BEGIN bm64 sound stack scrub
+# At the jr ra of each sound entry point that game code calls and that has a stack frame. The value
+# added to sp is the frame the delay slot pops (0 when sp is already restored). g_PlayGlobalSound and
+# g_PlayLocalSound get the same call in their bm64_sound_leave hooks above.
+
+[[patches.hook]]
+func = "func_80269704"
+before_vram = 0x80269798
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026BE80"
+before_vram = 0x8026BEA8
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026BEB0"
+before_vram = 0x8026BF20
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x28);
+"""
+
+[[patches.hook]]
+func = "func_8026BF28"
+before_vram = 0x8026BF60
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x18);
+"""
+
+[[patches.hook]]
+func = "func_8026BF68"
+before_vram = 0x8026BF88
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026BF90"
+before_vram = 0x8026BFC8
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x18);
+"""
+
+[[patches.hook]]
+func = "func_8026BFD0"
+before_vram = 0x8026C004
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026C208"
+before_vram = 0x8026C38C
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x60);
+"""
+
+[[patches.hook]]
+func = "func_8026C630"
+before_vram = 0x8026C658
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026C6D0"
+before_vram = 0x8026C76C
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026C77C"
+before_vram = 0x8026C88C
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29 + 0x30);
+"""
+
+[[patches.hook]]
+func = "func_8026C894"
+before_vram = 0x8026C8E0
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026C8E8"
+before_vram = 0x8026C934
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026C93C"
+before_vram = 0x8026C95C
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+
+[[patches.hook]]
+func = "func_8026C964"
+before_vram = 0x8026C97C
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+# END bm64 sound stack scrub

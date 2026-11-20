@@ -27,6 +27,10 @@
 //   BM64_EXIT_ON_REPLAY_END=1 quit when the replay runs out of input
 //   BM64_EXIT_TICK=<n>        quit at tick n
 //   BM64_DISABLE_CHEATS=1     turn cheats off for this run (same switch netplay uses)
+//   BM64_DIRECTOR=<hex list>  with BM64_RECORD: seeded random input on port 0 and a timed request for each
+//                             scene (arenas through Battle setup). BM64_DIRECTOR_SECS per scene (60),
+//                             BM64_DIRECTOR_BOOT ticks before the first (600), BM64_DIRECTOR_SEED (hex)
+//   BM64_SYNCTEST_DUMP=<dir>  on a SyncTest mismatch, write the window's forward images and the rerun image
 //   BM64_SYNCTEST=<n>         savestate SyncTest, read in src/game/bm64_state.cpp. Unset or 0 is off.
 //                             1 (or any other non-numeric text) rolls back one tick. 2..12 roll back
 //                             that many ticks, then rerun them and compare. Above 12 is clamped to 12.

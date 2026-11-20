@@ -4,6 +4,7 @@
 #include "bm64_online.h"
 #include "bm64_coop.h"
 #include "librecomp/helpers.hpp"
+#include "librecomp/overlays.hpp"
 #include "recomp.h"
 
 #include <atomic>
@@ -11,20 +12,22 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace bm64::state {
 
 constexpr uint32_t kMagic = 0x4E534D42u; // 'BMSN' little-endian
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr int kRing = 16;
 // Online rollback is clamped to 12 so it never rewinds into a snapshot the ring has overwritten.
 // SyncTest refuses a deeper window than that, because a deeper one cannot happen in a session.
 constexpr int kSyncDepthMax = 12;
 constexpr uint32_t kSoundSlots = 0x800BD770;
 constexpr uint32_t kSoundSlotsEnd = 0x800BD818;
-
+constexpr uint32_t kOverlaySlot = 0x80043000;
 // One forward step in a SyncTest window: the hash to match, the per-range hashes for the failure
 // log, and the pad sample so a live or recording run can feed the same bytes back on the rerun.
 struct SyncFrame {
@@ -32,7 +35,19 @@ struct SyncFrame {
     std::vector<std::string> names;
     std::vector<uint64_t> ranges;
     uint8_t pads[24]{};
+    // Only with BM64_SYNCTEST_DUMP: RDRAM 0x80000000-0x80800000 after the forward step.
+    std::vector<uint8_t> image;
+    std::vector<bm64::debug::ProcessStack> stacks;
 };
+
+void write_stacks(const std::filesystem::path& path, const std::vector<bm64::debug::ProcessStack>& stacks) {
+    if (FILE* f = std::fopen(path.string().c_str(), "w")) {
+        for (const auto& s : stacks) {
+            std::fprintf(f, "%04X %08X %08X\n", s.process_id, s.top, s.sp);
+        }
+        std::fclose(f);
+    }
+}
 
 enum class Phase {
     Idle,
@@ -73,6 +88,7 @@ std::vector<Segment> segments() {
         { 0x80063000, 0x800BD770 },
         { 0x800BD818, 0x800BE848 },
         { 0x8014B000, 0x8014C8D0 },
+        { 0x8019B0D0, 0x8019C2E0 },
         { 0x8029F5E4, 0x8029F608 },
         { 0x8029F6D8, 0x802A5300 },
         { 0x802A5300, 0x802A5330 },
@@ -99,6 +115,7 @@ struct Engine {
     bool running = false;
     bool synctest = false;
     int synctest_depth = 1;
+    std::string synctest_dump;
     int savetest_len = 0;
     int savetest_start = 200;
     Phase phase = Phase::Idle;
@@ -109,6 +126,11 @@ struct Engine {
     int boot_timer = 8;
     int overlay = -1;
     bool have_overlay = false;
+    // The ROM range last mapped at the overlay slot. RDRAM restore brings back the code bytes but
+    // not librecomp's function map, so a restore across an overlay change has to map it again.
+    uint32_t mapped_rom = 0;
+    int32_t mapped_ram = 0;
+    uint32_t mapped_size = 0;
     uint64_t sim = 0;
     uint8_t* rdram = nullptr;
 
@@ -236,6 +258,12 @@ void configure() {
             }
         }
     }
+    if (const char* v = std::getenv("BM64_SYNCTEST_DUMP")) {
+        if (e.synctest && v[0] != '\0') {
+            e.synctest_dump = v;
+            std::printf("[bm64 state] SyncTest failure dumps go to %s\n", v);
+        }
+    }
     if (const char* v = std::getenv("BM64_SAVETEST")) {
         e.savetest_len = std::atoi(v);
         if (e.savetest_len < 1) {
@@ -359,6 +387,9 @@ std::vector<uint8_t> capture(uint8_t* rdram) {
     write_u32(out, static_cast<uint32_t>(e.overlay));
     write_u32(out, static_cast<uint32_t>(e.scroll));
     write_u32(out, static_cast<uint32_t>(e.boot_timer));
+    write_u32(out, e.mapped_rom);
+    write_u32(out, static_cast<uint32_t>(e.mapped_ram));
+    write_u32(out, e.mapped_size);
     write_u32(out, static_cast<uint32_t>(e.sound.next_id));
     write_u32(out, static_cast<uint32_t>(e.sound.voices.size()));
     for (const Voice& v : e.sound.voices) {
@@ -399,6 +430,9 @@ bool restore(uint8_t* rdram, const uint8_t* data, size_t size) {
     int overlay = static_cast<int>(r.u32());
     int scroll = static_cast<int>(r.u32());
     int boot_timer = static_cast<int>(r.u32());
+    uint32_t mapped_rom = r.u32();
+    int32_t mapped_ram = static_cast<int32_t>(r.u32());
+    uint32_t mapped_size = r.u32();
     Sound sound;
     sound.next_id = static_cast<int32_t>(r.u32());
     uint32_t voices = r.u32();
@@ -429,6 +463,12 @@ bool restore(uint8_t* rdram, const uint8_t* data, size_t size) {
         std::fprintf(stderr, "[bm64 state] Snapshot RDRAM truncated\n");
         return false;
     }
+    if (mapped_size != 0 && (mapped_rom != e.mapped_rom || mapped_ram != e.mapped_ram || mapped_size != e.mapped_size)) {
+        load_overlays(mapped_rom, mapped_ram, mapped_size);
+        e.mapped_rom = mapped_rom;
+        e.mapped_ram = mapped_ram;
+        e.mapped_size = mapped_size;
+    }
     restore_sound(sound);
     bm64::debug::set_tick(tick);
     bm64::debug::set_input_cursor(cursor);
@@ -438,6 +478,17 @@ bool restore(uint8_t* rdram, const uint8_t* data, size_t size) {
     e.boot_timer = boot_timer;
     e.load_us = micros(t0, std::chrono::steady_clock::now());
     return true;
+}
+
+void note_overlay_load(uint32_t rom, int32_t ram, uint32_t size) {
+    // Every ROM read comes through here. Only the sub-overlay slot holds recompiled code that changes.
+    if (static_cast<uint32_t>(ram) != kOverlaySlot) {
+        return;
+    }
+    Engine& e = eng();
+    e.mapped_rom = rom;
+    e.mapped_ram = ram;
+    e.mapped_size = size;
 }
 
 void ring_save(uint8_t* rdram) {
@@ -506,6 +557,10 @@ void step_end_tests(uint8_t* rdram) {
         frame.hash = hash;
         bm64::debug::range_hashes(rdram, frame.names, frame.ranges);
         bm64::debug::copy_pads(frame.pads);
+        if (!e.synctest_dump.empty()) {
+            frame.image.assign(rdram, rdram + 0x800000);
+            bm64::debug::get_process_stacks(frame.stacks);
+        }
         // A replay that runs out closes the window early so the tail is compared before exit.
         if (e.sync_window.size() >= static_cast<size_t>(e.synctest_depth) || bm64::debug::input_replay_ended()) {
             e.phase = Phase::CompareReady;
@@ -540,6 +595,19 @@ void step_end_tests(uint8_t* rdram) {
             }
             std::printf("  window frame %zu of %zu, depth %d\n",
                 e.sync_index + 1, e.sync_window.size(), e.synctest_depth);
+            if (!e.synctest_dump.empty() && !want.image.empty()) {
+                const std::filesystem::path dir{ e.synctest_dump };
+                const uint64_t first = e.sim - e.sync_index;
+                for (size_t i = 0; i <= e.sync_index; i++) {
+                    const std::string tick = std::to_string(first + i);
+                    bm64::debug::dump_to(e.sync_window[i].image.data(), dir / ("forward_" + tick + ".bin"));
+                    write_stacks(dir / ("forward_" + tick + ".stacks"), e.sync_window[i].stacks);
+                }
+                std::vector<bm64::debug::ProcessStack> stacks;
+                bm64::debug::get_process_stacks(stacks);
+                bm64::debug::dump_to(rdram, dir / ("rerun_" + std::to_string(e.sim) + ".bin"));
+                write_stacks(dir / ("rerun_" + std::to_string(e.sim) + ".stacks"), stacks);
+            }
             std::fflush(stdout);
             std::exit(1);
         }

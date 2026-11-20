@@ -17,6 +17,8 @@ namespace bm64::state {
     const std::vector<Segment>& hash_segments();
 
     bool stacks_stable();
+    // Every recomp_load_overlays call. The snapshot keeps the last one and maps it again on restore.
+    void note_overlay_load(uint32_t rom, int32_t ram, uint32_t size);
     // Microseconds for the most recent save and load. Zero until one has run.
     void last_snapshot_cost(uint64_t& save_us, uint64_t& load_us);
 

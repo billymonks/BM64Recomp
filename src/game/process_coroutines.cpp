@@ -575,6 +575,32 @@ void bm64::debug::get_process_stacks(std::vector<ProcessStack>& out) {
     }
 }
 
+// Called at the return of each sound entry point (hooks in bm64.us.toml) with the caller's sp.
+// How deep the sound code goes depends on audio-thread state, which is outside the simulation, so
+// the words it leaves below the caller's sp differ between runs. A later frame can cover those words
+// without writing them, which puts them into the state hash. Below sp is dead by the o32 ABI, so
+// zeroing it changes nothing the game reads. Only process stacks are handled.
+extern "C" void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp) {
+    if (g_current_slot == nullptr) {
+        return;
+    }
+    auto word = [&](uint32_t addr) {
+        return static_cast<uint32_t>(MEM_W(0, static_cast<gpr>(static_cast<int32_t>(addr))));
+    };
+    uint32_t process = word(0x802AC344);
+    if (process < 0x80000400 || process >= 0x80800000) {
+        return;
+    }
+    uint32_t size = word(process + 0x20);
+    uint32_t sptop = word(process + 0x24);
+    if (sptop + size != g_current_slot->mips_sp || caller_sp <= sptop || caller_sp > sptop + size) {
+        return;
+    }
+    for (uint32_t a = sptop; a < caller_sp; a += 4) {
+        MEM_W(0, static_cast<gpr>(static_cast<int32_t>(a))) = 0;
+    }
+}
+
 namespace {
 
 void append_u32(std::vector<uint8_t>& out, uint32_t v) {

@@ -51,7 +51,7 @@ namespace {
         return {
             { "ovl",  { { 0x80043000, 0x80063000 } } },
             { "bss",  { { 0x80063000, 0x800BD770 }, { 0x800BD818, 0x800BE848 } } },
-            { "files", { { 0x8014B000, 0x8014C8D0 } } },
+            { "files", { { 0x8014B000, 0x8014C8D0 }, { 0x8019B0D0, 0x8019C2E0 } } },
             { "data", { { 0x8029F5E4, 0x8029F608 }, { 0x8029F6D8, 0x802A5300 } } },
             { "gfx",  { { 0x802A5300, 0x802A5330 }, { 0x802A5368, 0x802A5380 }, { 0x802A53BC, 0x802A5550 },
                         { 0x802A5554, 0x802A5A60 } } },
@@ -104,6 +104,32 @@ namespace {
         uint8_t last_pads[24]{};
     } state;
 
+    // BM64_DIRECTOR: unattended coverage recordings. Port 0 gets seeded random input, and on a
+    // timer a scene request goes into port 0's reserved byte, which replays apply the same way.
+    struct Director {
+        bool on = false;
+        std::vector<uint8_t> scenes;
+        uint64_t boot_ticks = 600;
+        uint64_t scene_ticks = 3600;
+        size_t index = 0;
+        uint32_t rng = 0x2545F491u;
+        uint32_t hold = 0;
+        uint16_t button = 0;
+        int8_t stick_x = 0;
+        int8_t stick_y = 0;
+    } director;
+
+    constexpr uint32_t level_loader = 0x802AC5D0;
+    constexpr uint32_t next_scene = 0x802AC5D4;
+    constexpr uint32_t scene_lock = 0x802A01B4;
+    constexpr uint32_t battle_settings = 0x802AC660;
+    constexpr uint8_t first_arena_scene = 0x90;
+    constexpr uint8_t last_arena_scene = 0x99;
+    constexpr uint8_t battle_setup_scene = 0x23;
+    // Command bytes 0xC0-0xC9: while a Battle arena request is pending, change it to arena 0-9.
+    constexpr uint8_t arena_override = 0xC0;
+    int32_t last_overlay = 0;
+
     // Toggled from the input thread, read by the game thread to decide whether to refresh the overlay text.
     std::atomic<bool> overlay_shown = false;
     std::mutex overlay_toggle_mutex;
@@ -129,6 +155,44 @@ namespace {
 
     float read_f32(uint8_t* rdram, uint32_t addr) {
         return std::bit_cast<float>(read_u32(rdram, addr));
+    }
+
+    void write_u32(uint8_t* rdram, uint32_t addr, uint32_t value) {
+        MEM_W(0, addr_reg(addr)) = static_cast<int32_t>(value);
+    }
+
+    // The same writes as func_8023AE6C(scene, 0x10, 0), including its refusal while a load is
+    // pending or D_802A01B4 is set. A Battle scene also gets its arena index in the settings block,
+    // which is where the stage select menu leaves it.
+    bool request_scene(uint8_t* rdram, uint8_t scene) {
+        uint32_t loader = read_u32(rdram, level_loader);
+        if (scene >= arena_override && scene <= arena_override + (last_arena_scene - first_arena_scene)) {
+            uint32_t pending = read_u32(rdram, next_scene);
+            if ((loader & 1) == 0 || pending < first_arena_scene || pending > last_arena_scene) {
+                return false;
+            }
+            uint32_t arena = first_arena_scene + (scene - arena_override);
+            write_u32(rdram, battle_settings + 0xA0, arena - first_arena_scene);
+            write_u32(rdram, next_scene, arena);
+            write_u32(rdram, 0x802AC5DC, arena);
+            return true;
+        }
+        if ((loader & 1) != 0 || read_u32(rdram, scene_lock) != 0) {
+            return false;
+        }
+        if (scene >= first_arena_scene && scene <= last_arena_scene) {
+            write_u32(rdram, battle_settings + 0xA0, static_cast<uint32_t>(scene - first_arena_scene));
+        }
+        write_u32(rdram, next_scene, scene);
+        write_u32(rdram, 0x802AC5DC, scene);
+        // The game enters 2E only from 2D, with entry 0x12. Entry 0x10 there reads a player object
+        // that does not exist yet (func_80250338).
+        const uint32_t entry = scene == 0x2E ? 0x12 : 0x10;
+        write_u32(rdram, 0x802AC5D8, entry);
+        write_u32(rdram, 0x802AC5E0, entry);
+        write_u32(rdram, level_loader, loader | 1);
+        write_u32(rdram, 0x802AC5E4, 0);
+        return true;
     }
 
     bool is_rdram_ptr(uint32_t addr) {
@@ -182,6 +246,103 @@ namespace {
             pos = next + 1;
         }
         return out;
+    }
+
+    uint32_t director_next() {
+        uint32_t x = director.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        director.rng = x;
+        return x;
+    }
+
+    void setup_director(const char* spec) {
+        for (const std::string& item : split(spec, ',')) {
+            uint32_t scene = 0;
+            if (parse_hex(item, scene) && scene > 0 && scene <= 0xFF) {
+                director.scenes.push_back(static_cast<uint8_t>(scene));
+            }
+            else {
+                fprintf(stderr, "[bm64 director] Ignoring scene %s (expected hex 01-FF)\n", item.c_str());
+            }
+        }
+        if (const char* secs = env("BM64_DIRECTOR_SECS")) {
+            director.scene_ticks = std::max<uint64_t>(60, std::strtoull(secs, nullptr, 10) * 60);
+        }
+        if (const char* boot = env("BM64_DIRECTOR_BOOT")) {
+            director.boot_ticks = std::strtoull(boot, nullptr, 10);
+        }
+        if (const char* seed = env("BM64_DIRECTOR_SEED")) {
+            uint32_t parsed = 0;
+            if (parse_hex(seed, parsed) && parsed != 0) {
+                director.rng = parsed;
+            }
+        }
+        director.on = !director.scenes.empty();
+        if (director.on) {
+            printf("[bm64 director] %zu scenes, %llu ticks each after %llu boot ticks, seed %08X\n",
+                director.scenes.size(), (unsigned long long)director.scene_ticks,
+                (unsigned long long)director.boot_ticks, director.rng);
+        }
+    }
+
+    // Fills port 0 and returns the scene command for this frame (0 for none).
+    uint8_t director_frame(uint8_t* rdram, gpr pads) {
+        if (director.hold == 0) {
+            director.hold = 4 + director_next() % 17;
+            director.stick_x = static_cast<int8_t>(static_cast<int>(director_next() % 161) - 80);
+            director.stick_y = static_cast<int8_t>(static_cast<int>(director_next() % 161) - 80);
+            director.button = 0;
+            if (director_next() % 4 == 0) {
+                director.button |= 0x8000;
+            }
+            if (director_next() % 8 == 0) {
+                director.button |= 0x4000;
+            }
+        }
+        director.hold--;
+        // Banks 1-3 are boot and menus: pulse A with the stick centred, so B never backs out.
+        bool menu = last_overlay >= 1 && last_overlay <= 17;
+        uint16_t button = menu ? ((state.tick % 30) < 2 ? 0x8000 : 0) : director.button;
+        MEM_H(0, pads) = static_cast<int16_t>(button);
+        MEM_B(2, pads) = menu ? 0 : director.stick_x;
+        MEM_B(3, pads) = menu ? 0 : director.stick_y;
+        MEM_B(4, pads) = 0;
+        for (uint32_t port = 1; port < num_ports; port++) {
+            MEM_H(port * pad_size + 0, pads) = 0;
+            MEM_B(port * pad_size + 2, pads) = 0;
+            MEM_B(port * pad_size + 3, pads) = 0;
+        }
+
+        if (state.tick < director.boot_ticks) {
+            return 0;
+        }
+        uint64_t due = director.boot_ticks + director.index * director.scene_ticks;
+        if (director.index < director.scenes.size() && state.tick >= due) {
+            uint8_t scene = director.scenes[director.index];
+            bool arena = scene >= first_arena_scene && scene <= last_arena_scene;
+            uint32_t loader = read_u32(rdram, level_loader);
+            if ((loader & 1) == 0 && read_u32(rdram, scene_lock) == 0) {
+                printf("[bm64 director] Tick %llu: scene %02X%s\n", (unsigned long long)state.tick, scene,
+                    arena ? " (through battle setup)" : "");
+                director.index++;
+                return arena ? battle_setup_scene : scene;
+            }
+        }
+        if (director.index > 0) {
+            uint8_t current = director.scenes[director.index - 1];
+            if (current >= first_arena_scene && current <= last_arena_scene) {
+                uint32_t pending = read_u32(rdram, next_scene);
+                if ((read_u32(rdram, level_loader) & 1) != 0 && pending >= first_arena_scene &&
+                    pending <= last_arena_scene && pending != current) {
+                    printf("[bm64 director] Tick %llu: battle setup chose %02X, overriding with %02X\n",
+                        (unsigned long long)state.tick, pending, current);
+                    return static_cast<uint8_t>(arena_override + (current - first_arena_scene));
+                }
+            }
+        }
+        return 0;
     }
 
     // "[name:]start-end[+start-end...]", comma-separated.
@@ -660,6 +821,14 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
         if (record) {
             setup_recording(record);
         }
+        if (const char* scenes = env("BM64_DIRECTOR")) {
+            if (state.input_mode == InputMode::Record) {
+                setup_director(scenes);
+            }
+            else {
+                fprintf(stderr, "[bm64 director] BM64_DIRECTOR needs BM64_RECORD; ignored\n");
+            }
+        }
     }
     bm64::online::handshake();
 }
@@ -728,10 +897,12 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
     auto remember = [&]() {
         // osContGetQuery fills 0x802AC400 from the devices this process opened. A replay has
         // no record of that, so derive it from which ports the file actually uses.
-        if (state.input_mode == InputMode::Replay) {
+        if (state.input_mode == InputMode::Replay || (state.input_mode == InputMode::Record && director.on)) {
+            // A director recording uses port 0 only, which is what its replay derives.
+            uint8_t connected = state.input_mode == InputMode::Replay ? state.replay_connected : uint8_t{ 0x1 };
             for (uint32_t port = 0; port < num_ports; port++) {
                 uint8_t* status = rdram + (0x802AC400u - 0x80000000u) + port * 4u;
-                bool present = (state.replay_connected & (1u << port)) != 0;
+                bool present = (connected & (1u << port)) != 0;
                 status[0] = 0x00;
                 status[1] = present ? 0x05 : 0x00;
                 status[2] = present ? 0x01 : 0x00;
@@ -741,6 +912,7 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
         for (uint32_t i = 0; i < num_ports * pad_size; i++) {
             state.last_pads[i] = MEM_BU(i, pads);
         }
+        state.last_pads[5] = 0;
     };
     auto write_pads = [&](const uint8_t* bytes) {
         for (uint32_t i = 0; i < num_ports; i++) {
@@ -755,9 +927,16 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
         remember();
     };
 
+    // Byte 5 of port 0 is padding in the game's pad struct. The remembered copy keeps the director's
+    // scene command there, so a SyncTest rerun applies it on the same step as the first pass.
     if (state.pad_reuse) {
         state.pad_reuse = false;
+        const uint8_t command = state.reuse_pads[5];
         write_pads(state.reuse_pads);
+        if (command != 0) {
+            request_scene(rdram, command);
+        }
+        state.last_pads[5] = command;
         return;
     }
 
@@ -784,7 +963,14 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
 
+    uint8_t command = 0;
     if (state.input_mode == InputMode::Record) {
+        if (director.on) {
+            command = director_frame(rdram, pads);
+            if (command != 0) {
+                request_scene(rdram, command);
+            }
+        }
         for (uint32_t i = 0; i < num_ports; i++) {
             uint16_t button = static_cast<uint16_t>(MEM_HU(i * pad_size + 0, pads));
             int8_t stick_x = MEM_B(i * pad_size + 2, pads);
@@ -794,7 +980,7 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
             write_pod(state.record_file, stick_x);
             write_pod(state.record_file, stick_y);
             write_pod(state.record_file, err);
-            write_pod(state.record_file, uint8_t{ 0 });
+            write_pod(state.record_file, i == 0 ? command : uint8_t{ 0 });
         }
         if ((state.input_frame % 60) == 0) {
             state.record_file.flush();
@@ -807,6 +993,7 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
             remember();
             return;
         }
+        command = state.replay_frames[state.replay_cursor + 5];
         for (uint32_t i = 0; i < num_ports; i++) {
             const uint8_t* f = state.replay_frames.data() + state.replay_cursor;
             uint16_t button;
@@ -817,19 +1004,29 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
             MEM_B(i * pad_size + 4, pads) = static_cast<int8_t>(f[4]);
             state.replay_cursor += pad_size;
         }
+        if (command != 0) {
+            request_scene(rdram, command);
+        }
     }
     remember();
+    state.last_pads[5] = command;
 }
 
 extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
     int32_t overlay_id = _arg<0, int32_t>(rdram, ctx);
     bm64::coop::note_overlay(overlay_id);
+    last_overlay = overlay_id;
 
     if (state.exiting) {
         return;
     }
     if (state.exit_tick >= 0 && state.tick >= static_cast<uint64_t>(state.exit_tick)) {
         exit_game("BM64_EXIT_TICK reached");
+        return;
+    }
+    if (director.on && director.index == director.scenes.size() &&
+        state.tick >= director.boot_ticks + director.scenes.size() * director.scene_ticks) {
+        exit_game("director finished");
         return;
     }
     // A SyncTest window that is still being rerun has to finish. The restored cursor puts the
