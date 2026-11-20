@@ -35,7 +35,7 @@
 namespace bm64::online {
 namespace {
 
-constexpr uint32_t kProtocol = 3;
+constexpr uint32_t kProtocol = 4;
 // bm64::state keeps 16 snapshots, and a rollback needs one for every tick it can rewind.
 constexpr int kMaxRollback = 12;
 // A UDP datagram cannot carry the 128 KB save image. Handshake chunks stay under a typical MTU.
@@ -128,6 +128,7 @@ struct Runtime {
     std::unique_ptr<bm64::rollback::Session> session;
     int player = 0;
     int players = 1;
+    bool leave_logged[bm64::rollback::kMaxPlayers]{};
     bool launch_set = false;
     bool launch_host = true;
 };
@@ -242,6 +243,10 @@ bool active() {
 
 int player_count() {
     return rt().players;
+}
+
+int local_player() {
+    return rt().player;
 }
 
 bool speculative() {
@@ -541,7 +546,13 @@ int begin_frame(uint8_t* rdram) {
     if (!r.session) {
         return 1;
     }
-    for (int spins = 0; spins < 5000; spins++) {
+    // Longer than noticing a silent player and the host deciding their leave.
+    auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < give_up) {
+        if (r.session->ended()) {
+            std::fprintf(stderr, "[bm64 net] %s\n", r.session->end_reason());
+            std::exit(1);
+        }
         bm64::rollback::Step step;
         bool stall = false;
         bool ok = r.session->poll(step, stall, [&](uint64_t tick) {
@@ -562,6 +573,13 @@ int begin_frame(uint8_t* rdram) {
         if (step.loaded) {
             std::printf("[bm64 net] Rollback to tick %llu (depth %d, %d total)\n",
                 static_cast<unsigned long long>(step.tick), r.session->max_depth(), r.session->rollbacks());
+        }
+        for (int p = 0; p < r.players; p++) {
+            if (r.session->left(p) && !r.leave_logged[p]) {
+                r.leave_logged[p] = true;
+                std::printf("[bm64 net] Player %d left; the AI takes over from tick %llu\n",
+                    p, static_cast<unsigned long long>(r.session->leave_tick(p)));
+            }
         }
         return step.render ? 1 : 0;
     }
@@ -600,9 +618,20 @@ void note_barrier(int32_t overlay) {
         return;
     }
     uint64_t tick = bm64::state::sim_tick();
+    if (!r.session->notify_barrier(tick, overlay)) {
+        std::printf("[bm64 net] Load of overlay %d at tick %llu came from a guess; rolling back\n",
+            overlay, static_cast<unsigned long long>(tick));
+        return;
+    }
     bm64::state::drop_snapshots_before(tick);
-    r.session->notify_barrier(tick, overlay);
     std::printf("[bm64 net] Load barrier overlay %d at tick %llu\n", overlay, static_cast<unsigned long long>(tick));
+}
+
+bool player_left_this_step(int player) {
+    if (!rt().on || player < 0 || player >= bm64::rollback::kMaxPlayers) {
+        return false;
+    }
+    return rt().input.player[player].err == bm64::rollback::kLeftErr;
 }
 
 bool pads_for_step(uint8_t out[24]) {

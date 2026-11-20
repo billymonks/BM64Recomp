@@ -321,7 +321,7 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
 
 ## Phase 4 – Rollback core
 
-The session is our own code in `src/net/` (not GGPO or GekkoNet). `bm64_net_tests` passes six tests: one tick late, latency, loss, late packet, silence and barrier. Loopback uses `BM64_NET=host|guest`. `BM64_NET_PEER` is a comma-separated list, so four local processes can mesh. `BM64_NET_SAMPLE=zero` replaces the hardware sample with a zero pad; two processes otherwise read the same stick twice and disagree. Non-presented resim steps are not hashed: their end state does not match the peer that presented that tick, and the next presented tick matched in the logs.
+The session is our own code in `src/net/` (not GGPO or GekkoNet). `bm64_net_tests` passes ten tests: one tick late, latency, loss, late packet, silence, barrier, guessed load, real load, leave, and leave with the host missing the end. Loopback uses `BM64_NET=host|guest`. `BM64_NET_PEER` is a comma-separated list, so four local processes can mesh. `BM64_NET_SAMPLE` picks the local sample, because two processes otherwise read the same stick twice and disagree: `zero` sends a zero pad; `script` keeps player 0 on the hardware and gives every other player a seeded random stick (held 4–20 samples, no buttons); `script-buttons` adds A (1 in 4) and B (1 in 8), never Start. Non-presented resim steps are not hashed: their end state does not match the peer that presented that tick, and the next presented tick matched in the logs.
 
 - [x] **4.1 Rollback session library**
   - Depends on: nothing; game-independent.
@@ -360,6 +360,7 @@ The session is our own code in `src/net/` (not GGPO or GekkoNet). `bm64_net_test
   - Work: treat overlay loads and map changes (`load_from_rom_to_addr` and `recomp_load_overlays`) as points rollback can't cross. Peers wait for each other, then the snapshot history is cleared.
   - Done when: stage changes in Battle and story never roll back across a load.
   - Next: queue item 2 replaces this design. Barriers apply only to loads on final ticks, and a rollback across a guessed load re-points the overlay table from a log.
+  - Note (2026-11-20): queue item 2 is in (step 1 done). A load waits until its tick's inputs are all known. It becomes a barrier only if they match what was simulated; otherwise the next poll rolls back before it and the snapshot remaps the overlay slot. Peers no longer wait on each other's load count. Unit tests only; step 2 is open.
   - Steps:
     1. [agent] Queue item 2, including its unit tests.
     2. [user] The 4.2 loopback run, but through two Battle rounds and back to the arena menu, then into a story stage from the title. Both logs must print the same `Load barrier overlay X at tick T` lines, with no desync.
@@ -541,6 +542,7 @@ Code for a loopback lobby is in the build. A Discord application and two PCs are
     6. Tick when step 5 passes and the notes are written.
   - Note: the debug overlay prints local player, delay, rollback count, and ticks since the quietest peer. Not shown in a window, and not release-ready.
   - Note (audit, 2026-11-19): the AI handoff was removed. Each peer wrote `controlType` 2 when its own timer passed 300 ticks, and the peers' timers differ, so the handoff landed on different ticks and desynced. Now a silent peer stalls the session at the rollback window and the session times out. A handoff has to travel through the input stream; queue item 3 has the design.
+  - Note (2026-11-20): queue item 3 is in (step 1 done). A silent player is marked left from one tick T on every peer, their pad from T on has `err 0xFE`, and `begin_step` turns their bomber into an AI on that tick. Expect a stall of about 3–5 s while the peers notice and the host decides. Unit tests only; not run in the game.
 
 ## Phase 6 – Story co-op gameplay
 
@@ -822,6 +824,8 @@ Every design below has been decided. If the code turns out to differ from what a
 
 **Check.** Build. No unit test is needed; item 6 uses it. Document the variable in this file under 4.2.
 
+**Done (2026-11-20).** `net_sample_mode` and `script_sample` in `src/game/bm64_debug.cpp`, as designed; `bm64::online::local_player()` is new. The build passes. Not run in a session. Found on the way: the hardware path copied the pad with `MEM_BU`, which reads the button's high byte first, then `memcpy`'d those two bytes into a host `u16`, so every online button arrived byte-swapped (A `0x8000` became `0x0080`). The SyncTest and savetest pad reuse (`last_pads`) had the same swap. Neither was ever exercised: online runs used `zero`, and SyncTest of recordings rereads the file instead of reusing pads. Both now go through `read_pad`, which stores the button in host order like a recording frame.
+
 ### 2. Load barrier on final ticks only (4.4)
 
 **Why.**
@@ -850,6 +854,13 @@ Every design below has been decided. If the code turns out to differ from what a
 
 **Done when.** All tests pass, and the old code fails "guessed load".
 
+**Done (2026-11-20).**
+- Design step 1 (the overlay log) was not needed. Since the 3.8 fixes, each snapshot stores the ROM range mapped at the sub-overlay slot (`mapped_rom`, `mapped_ram`, `mapped_size` in `bm64_state.cpp`), and `restore` calls `load_overlays` again when it differs. That is the only slot whose recompiled code changes. SyncTest at depth 12 already crossed overlay changes with it.
+- Steps 2–4 are as designed. `Session::wait_final` and the decision are in `src/net/rollback.cpp`. `notify_barrier` returns `bool`, and `online::note_barrier` drops snapshots only on `true`. `barrier_open_`, `peers_caught_up` and the per-peer load sequence are gone. `barrier_waits()` now counts barriers that had to wait for input.
+- `Config::wait_idle` is new: called on each pass of the wait instead of sleeping. The unit tests use it to run the other peer, because both share one thread.
+- Tests: "guessed load" and "real load" in `rollback_test.cpp`. With only the API changed (barrier always accepted, the old load-count wait kept), "guessed load" stalled at tick 21 and "real load" logged two barriers per peer. With the new code both pass. The old "barrier" test fires a barrier at a fixed tick regardless of input, so the peer that guessed that tick now correctly refuses it; the test prints that instead of failing.
+- Not run in the game.
+
 ### 3. Deterministic disconnect (5.6)
 
 **Why.** A player handed to the AI on each peer's own timer desyncs, so that code was removed. Today a silent peer stalls everyone at the rollback window, and then the session exits.
@@ -864,6 +875,15 @@ Every design below has been decided. If the code turns out to differ from what a
 **Why T is safe.** No peer can finalize a tick past its own Lp, because it lacks k's input there. T is larger than every Lp the host has heard, so no finalized tick changes. The relays in step 1 make sure every peer gets k's real inputs for every tick before T.
 
 **Tests.** Three peers; player 2's packets stop at tick 50 and never resume. Expect all three to keep advancing after the leave, equal final hashes, and player 2's pad equal to `err 0xFE` from the same T on every peer. Second case: player 2's last packets reach player 1 but not player 0. T must come from player 1's Lp.
+
+**Done (2026-11-20).** In `src/net/rollback.cpp`: `update_leaves`, `relay`, `apply_leave`, and packet types `kSilent` (5), `kLeave` (6) and `kRelay` (7). `input_at` answers "known, and which pad" for every reader, so a left player's ticks from T on count as known without filling the vector. Protocol is 4. Differences from the design, each found while testing:
+- Silence is measured in milliseconds on a host clock (`Config::silence_ms` 3000, `leave_decide_ms` 2000, `clock_ms` for tests), not in ticks. A peer stalled at the rollback window stops advancing ticks, so a tick count would never reach 180.
+- Lp is sent as `received_count`: the number of leading ticks held without a gap. A peer can only finalize ticks inside that prefix, and the peer with the largest one can relay all of it.
+- T is also at least every remaining peer's confirmed tick. Every peer that has seen a `kSilent` for k relays k's inputs, not only peers that are silent on k themselves. Otherwise a peer that still hears k never shares what the host lacks.
+- The host resends `kLeave` until each remaining peer's confirmed tick is **greater than** T. "At least T" was not enough: a peer can finalize every tick before T without knowing about the leave, and the first test run stopped there.
+- If the host goes silent, the others end the session after `silence_ms + leave_decide_ms`. A player who receives a `kLeave` naming themselves also ends. `begin_frame` gives up after 20 s instead of 5000 polls, and exits with `end_reason()`.
+- Game side: `bm64::coop::hand_to_ai` runs in `begin_step` after `ring_save`, not straight after `begin_frame`. Before the snapshot, the snapshot for tick t would hold a write made from tick t's input, possibly a guess.
+- Tests "leave" and "leave, host missed the end" pass. In the second, the host held 45 of player 2's inputs and T came out at 52, from player 1. Not run in the game.
 
 ### 4. Main-player category by call site (6.4, 6.6, 6.7)
 

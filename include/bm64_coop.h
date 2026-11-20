@@ -48,6 +48,8 @@ void note_overlay(int overlay_id);
 bool active();
 bool omit_render_camera();
 void apply_rules(uint8_t* rdram);
+// A human whose session player left becomes an AI bomber (controlType 1 to 2).
+void hand_to_ai(uint8_t* rdram, int player);
 
 } // namespace bm64::coop
 

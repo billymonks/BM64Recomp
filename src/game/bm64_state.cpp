@@ -751,6 +751,15 @@ int begin_step(uint8_t* rdram) {
     }
 
     ring_save(rdram);
+    // After the snapshot: it depends on this tick's input, and a rollback to this tick restores
+    // the state from before it and applies the corrected input again.
+    if (bm64::online::active()) {
+        for (int player = 0; player < bm64::online::player_count(); player++) {
+            if (bm64::online::player_left_this_step(player)) {
+                bm64::coop::hand_to_ai(rdram, player);
+            }
+        }
+    }
     e.sim = bm64::debug::tick();
     e.speculative = spec;
     e.skip_lookat = render == 0;

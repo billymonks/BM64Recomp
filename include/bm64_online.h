@@ -7,6 +7,7 @@
 namespace bm64::online {
     bool active();
     int player_count();
+    int local_player();
     // Launcher buttons. Ignored when BM64_NET is already set.
     void prepare_loopback(bool host_side);
     // Launcher match options. Environment variables win when they are set.
@@ -24,6 +25,8 @@ namespace bm64::online {
     bool accepting_sample();
     // Writes the 4 pads for the tick about to be simulated. Returns false if online is off.
     bool pads_for_step(uint8_t out[24]);
+    // This tick's pad for the player says they left the session.
+    bool player_left_this_step(int player);
     void push_local_pad(const uint8_t pad[6]);
     // Empty when online is off. Delay, rollback count, and ticks since the quietest remote peer.
     void status_line(char* buf, size_t cap);

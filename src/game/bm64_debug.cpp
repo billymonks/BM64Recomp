@@ -909,6 +909,86 @@ extern "C" void bm64_session_seed(uint8_t* rdram, recomp_context* ctx) {
 
 namespace {
     std::atomic_bool cheats_disabled{ false };
+
+    // Same layout as a recording frame: button in host order, then stick x, stick y, errno, reserved.
+    void read_pad(uint8_t* rdram, gpr pads, uint32_t port, uint8_t out[6]) {
+        uint16_t button = static_cast<uint16_t>(MEM_HU(port * pad_size + 0, pads));
+        std::memcpy(out, &button, sizeof(button));
+        out[2] = MEM_BU(port * pad_size + 2, pads);
+        out[3] = MEM_BU(port * pad_size + 3, pads);
+        out[4] = MEM_BU(port * pad_size + 4, pads);
+        out[5] = 0;
+    }
+
+    enum class NetSample { Hardware, Zero, Script, ScriptButtons };
+
+    NetSample net_sample_mode() {
+        static int mode = -1;
+        if (mode < 0) {
+            const char* v = std::getenv("BM64_NET_SAMPLE");
+            NetSample m = NetSample::Hardware;
+            if (v != nullptr && std::strcmp(v, "zero") == 0) {
+                m = NetSample::Zero;
+            }
+            else if (v != nullptr && std::strcmp(v, "script") == 0) {
+                m = NetSample::Script;
+            }
+            else if (v != nullptr && std::strcmp(v, "script-buttons") == 0) {
+                m = NetSample::ScriptButtons;
+            }
+            mode = static_cast<int>(m);
+        }
+        return static_cast<NetSample>(mode);
+    }
+
+    // Local input, not game state: it advances only when the session accepts a sample, so a
+    // resimulation never consumes it.
+    struct ScriptPad {
+        bool seeded = false;
+        uint32_t rng = 0;
+        int hold = 0;
+        uint16_t button = 0;
+        int8_t stick_x = 0;
+        int8_t stick_y = 0;
+    } script_pad;
+
+    uint32_t script_next() {
+        uint32_t x = script_pad.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        script_pad.rng = x;
+        return x;
+    }
+
+    void script_sample(bool buttons, uint8_t out[6]) {
+        if (!script_pad.seeded) {
+            uint32_t player = static_cast<uint32_t>(bm64::online::local_player());
+            script_pad.rng = 0x9E3779B9u ^ (0x85EBCA6Bu * (player + 1));
+            script_pad.seeded = true;
+        }
+        if (script_pad.hold == 0) {
+            script_pad.hold = 4 + static_cast<int>(script_next() % 17);
+            script_pad.stick_x = static_cast<int8_t>(static_cast<int>(script_next() % 161) - 80);
+            script_pad.stick_y = static_cast<int8_t>(static_cast<int>(script_next() % 161) - 80);
+            script_pad.button = 0;
+            if (buttons) {
+                // Never Start (0x1000): it would pause.
+                if (script_next() % 4 == 0) {
+                    script_pad.button |= 0x8000;
+                }
+                if (script_next() % 8 == 0) {
+                    script_pad.button |= 0x4000;
+                }
+            }
+        }
+        script_pad.hold--;
+        std::memcpy(out, &script_pad.button, sizeof(script_pad.button));
+        out[2] = static_cast<uint8_t>(script_pad.stick_x);
+        out[3] = static_cast<uint8_t>(script_pad.stick_y);
+        out[4] = 0;
+        out[5] = 0;
+    }
 }
 
 void bm64::debug::set_cheats_disabled(bool disabled) {
@@ -961,10 +1041,9 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
                 status[3] = present ? 0x00 : 0x08;
             }
         }
-        for (uint32_t i = 0; i < num_ports * pad_size; i++) {
-            state.last_pads[i] = MEM_BU(i, pads);
+        for (uint32_t port = 0; port < num_ports; port++) {
+            read_pad(rdram, pads, port, state.last_pads + port * pad_size);
         }
-        state.last_pads[5] = 0;
     };
     auto write_pads = [&](const uint8_t* bytes) {
         for (uint32_t i = 0; i < num_ports; i++) {
@@ -997,17 +1076,17 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
         if (bm64::online::active() && bm64::online::accepting_sample()) {
             uint8_t local[6];
             // Two local instances otherwise sample the same physical stick twice and disagree.
-            static int sample_zero = -1;
-            if (sample_zero < 0) {
-                const char* v = std::getenv("BM64_NET_SAMPLE");
-                sample_zero = (v != nullptr && std::strcmp(v, "zero") == 0) ? 1 : 0;
-            }
-            if (sample_zero) {
+            // Scripted modes leave player 0 on the hardware and generate every other player's pad.
+            NetSample mode = net_sample_mode();
+            bool scripted = (mode == NetSample::Script || mode == NetSample::ScriptButtons) && bm64::online::local_player() != 0;
+            if (mode == NetSample::Zero) {
                 std::memset(local, 0, sizeof(local));
-            } else {
-                for (int b = 0; b < 6; b++) {
-                    local[b] = MEM_BU(b, pads);
-                }
+            }
+            else if (scripted) {
+                script_sample(mode == NetSample::ScriptButtons, local);
+            }
+            else {
+                read_pad(rdram, pads, 0, local);
             }
             bm64::online::push_local_pad(local);
         }

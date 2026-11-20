@@ -387,6 +387,17 @@ bool omit_render_camera() {
     return sess().on;
 }
 
+void hand_to_ai(uint8_t* rdram, int player) {
+    int slot = story() ? slot_of_player(rdram, player) : player;
+    if (slot < 0 || slot >= bm64::coop::kPlayerSlots) {
+        return;
+    }
+    uint32_t control = bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride + 0x24;
+    if (word(rdram, control) == 1) {
+        set_word(rdram, control, 2);
+    }
+}
+
 void apply_rules(uint8_t* rdram) {
     Session& s = sess();
     if (story()) {
