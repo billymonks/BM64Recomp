@@ -344,6 +344,7 @@ namespace {
             state.record_file.close();
         }
         bm64::state::report_sound_counters();
+        bm64::state::report_synctest();
         printf("[bm64 debug] Exiting at tick %llu: %s\n", (unsigned long long)state.tick, reason);
         fflush(stdout);
         ultramodern::quit();
@@ -831,7 +832,9 @@ extern "C" void bm64_debug_tick(uint8_t* rdram, recomp_context* ctx) {
         exit_game("BM64_EXIT_TICK reached");
         return;
     }
-    if (state.exit_on_replay_end && state.input_mode == InputMode::ReplayEnded) {
+    // A SyncTest window that is still being rerun has to finish. The restored cursor puts the
+    // mode back to Replay for those steps, but a window that ran past the file does not.
+    if (state.exit_on_replay_end && state.input_mode == InputMode::ReplayEnded && !bm64::state::synctest_busy()) {
         exit_game("replay ended");
         return;
     }
@@ -914,6 +917,14 @@ void set_pad_reuse(const uint8_t pads[24]) {
 
 void copy_pads(uint8_t out[24]) {
     std::memcpy(out, dbg().last_pads, 24);
+}
+
+bool input_replaying() {
+    return dbg().input_mode == InputMode::Replay;
+}
+
+bool input_replay_ended() {
+    return dbg().input_mode == InputMode::ReplayEnded;
 }
 
 uint64_t tick() {

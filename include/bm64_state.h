@@ -35,6 +35,12 @@ namespace bm64::state {
     // virtual ids reused: bm64_sound_enter saw a start that already had a virtual id.
     void report_sound_counters();
     void sound_counter_line(char* buf, size_t cap);
+
+    // True between the load and the last compared step of a SyncTest window. Replay exit waits
+    // so a recording that ends mid-window is still compared.
+    bool synctest_busy();
+    // Prints "BM64 SYNCTEST PASS" once, on a clean exit. A failure has already printed and exited.
+    void report_synctest();
 }
 
 namespace bm64::proc {

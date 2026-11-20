@@ -265,7 +265,7 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
   - Done when: SyncTest runs clean through every Battle arena and every story world. Fix or document every mismatch.
   - Steps:
     1. [user] Record one file per Battle arena (bank 14 has 10 sub-overlays; check the debug overlay's "overlay" field to confirm which arena is loaded), 1–2 minutes each, with real input on at least two pads. Record one file per story world (banks 4–9), from the first stage to the boss. The 2.3 recordings count. Name them `st_<overlay>.bm64rec`.
-    2. [agent, ask first] For each file: `$env:BM64_SYNCTEST = "1"; .\tools\run-replay.ps1 -Replay st_X.bm64rec -Out st_X -TimeoutSec 3600`. Pass: no `BM64 SYNCTEST FAIL` line in the log, and exit code 0.
+    2. [agent, ask first] For each file: `$env:BM64_SYNCTEST = "1"; .\tools\run-replay.ps1 -Replay st_X.bm64rec -Out st_X -TimeoutSec 3600`. The number is the rollback depth (`1` is one tick, `12` is the session cap). Pass: no `BM64 SYNCTEST FAIL` line in the log, and exit code 0. A clean exit also prints `BM64 SYNCTEST PASS ticks N depth D`.
     3. [agent] On `FAIL tick N`, the log lists the ranges that differ. Classify:
        - `heap` or `prc` differing in a few bytes inside a process stack: a dead stack slot or an o32 argument home. Confirm it's a stack (between the process's stack bounds), then add it to the skip list as phase 6.1 did, with a comment naming the function.
        - `slots`: co-op state outside RDRAM. Search for host `static` variables in `src/game/bm64_coop.cpp` that change game memory, and move them into the co-op region.
@@ -273,6 +273,16 @@ Checked on 2026-11-18 without a player at the keyboard. SyncTest passed on `test
     4. [agent] Never "fix" a SyncTest failure by removing a range from the hash without proving it's not game state. Write the proof in the note.
     5. Keep a table in this note: file, overlay, ticks, result. Tick when every arena and world row passes.
   - Note: `BM64_SYNCTEST=1` exited clean on `test.bm64rec` (tick 9591) after the player move. `new.bm64rec` exited clean before that move, then failed at tick 8448 until the hash skipped the o32 argument home (phase 6.1). Every other arena and story world is still open.
+  - Note (2026-11-19): `BM64_SYNCTEST=<n>` in `src/game/bm64_state.cpp` is the rollback depth. `1` saves, steps, loads, steps, and compares every tick. `2`–`12` save once, run that many ticks, load, and rerun them, comparing the hash after each. Above 12 is clamped to 12, the same cap as `BM64_NET_ROLLBACK`. Both passes skip the render-thread handoff. A replay rereads the file from the restored cursor; a live pad is replayed from the sample stored on the forward pass. A recording that ends mid-window is compared before exit. A mismatch prints `BM64 SYNCTEST FAIL`, the ranges, and `window frame k of n`.
+
+    | file | overlay | ticks | depth | result |
+    |---|---|---|---|---|
+    | `test.bm64rec` | boot, then bank 4 sub-overlays 1 and 2 (the stage 4.1 recording). Overlay ids 11, 9, 16, 12, 18, 19. No bank 14. | 9591 | 1 and 12 | pass. The depth 1 and depth 12 hash logs match each other and the 3.6 SyncTest log. `speculative starts 0` |
+    | `new.bm64rec` | boot, menus, bank 7 sub-overlay 1 (the stage 7.1 recording), then a menu. Overlay ids 11, 9, 16, 12, 50, 11. No bank 14. | 8838 | 1 and 12 | pass. The depth 1 and depth 12 hash logs match. `speculative starts 0` |
+    | `st_<arena>.bm64rec` | bank 14, one file per sub-overlay (10 arenas), two pads | | | not recorded |
+    | `st_<world>.bm64rec` | banks 4–9, one file per world, first stage through the boss | | | not recorded |
+
+    Not ticked. Step 1 has no per-arena recording and no full story world.
 - [ ] **3.9 Player quicksave (optional)**
   - Depends on: 3.7.
   - Work: user-facing quicksave/quickload built on 3.7. Same session only; native stacks aren't portable across runs.

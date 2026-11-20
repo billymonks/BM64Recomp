@@ -19,8 +19,20 @@ namespace bm64::state {
 constexpr uint32_t kMagic = 0x4E534D42u; // 'BMSN' little-endian
 constexpr uint32_t kVersion = 1;
 constexpr int kRing = 16;
+// Online rollback is clamped to 12 so it never rewinds into a snapshot the ring has overwritten.
+// SyncTest refuses a deeper window than that, because a deeper one cannot happen in a session.
+constexpr int kSyncDepthMax = 12;
 constexpr uint32_t kSoundSlots = 0x800BD770;
 constexpr uint32_t kSoundSlotsEnd = 0x800BD818;
+
+// One forward step in a SyncTest window: the hash to match, the per-range hashes for the failure
+// log, and the pad sample so a live or recording run can feed the same bytes back on the rerun.
+struct SyncFrame {
+    uint64_t hash = 0;
+    std::vector<std::string> names;
+    std::vector<uint64_t> ranges;
+    uint8_t pads[24]{};
+};
 
 enum class Phase {
     Idle,
@@ -86,6 +98,7 @@ struct Engine {
     bool configured = false;
     bool running = false;
     bool synctest = false;
+    int synctest_depth = 1;
     int savetest_len = 0;
     int savetest_start = 200;
     Phase phase = Phase::Idle;
@@ -124,14 +137,15 @@ struct Engine {
     uint64_t save_us = 0;
     uint64_t load_us = 0;
 
-    uint64_t discard_hash = 0;
-    std::vector<std::string> discard_names;
-    std::vector<uint64_t> discard_ranges;
     std::vector<uint64_t> record_hashes;
     size_t compare_index = 0;
     bool record_saved = false;
+    std::vector<SyncFrame> sync_window;
+    size_t sync_index = 0;
     int synctest_mismatches = 0;
     int synctest_ticks = 0;
+    bool synctest_failed = false;
+    std::atomic<bool> synctest_reported{ false };
     int inject_tick = -1;
     uint32_t inject_addr = 0;
     uint8_t inject_value = 0;
@@ -154,8 +168,26 @@ void report_sound_counters() {
     std::fflush(stdout);
 }
 
+void report_synctest() {
+    Engine& e = eng();
+    if (!e.synctest || e.synctest_reported.exchange(true)) {
+        return;
+    }
+    if (e.synctest_failed || e.synctest_ticks <= 0) {
+        return;
+    }
+    std::printf("BM64 SYNCTEST PASS ticks %d depth %d\n", e.synctest_ticks, e.synctest_depth);
+    std::fflush(stdout);
+}
+
+bool synctest_busy() {
+    const Phase phase = eng().phase;
+    return phase == Phase::CompareReady || phase == Phase::Comparing;
+}
+
 void sound_counters_atexit() {
     report_sound_counters();
+    report_synctest();
 }
 
 void sound_counter_line(char* buf, size_t cap) {
@@ -181,7 +213,28 @@ void configure() {
     // Registered after Engine is constructed, so this runs before that static is destroyed.
     std::atexit(sound_counters_atexit);
     if (const char* v = std::getenv("BM64_SYNCTEST")) {
-        e.synctest = v[0] != '0';
+        // A leading 0 stays off, including "0" and "08", matching the old on/off check.
+        if (v[0] != '\0' && v[0] != '0') {
+            e.synctest = true;
+            e.synctest_depth = 1;
+            bool digits = true;
+            for (const char* p = v; *p != '\0'; p++) {
+                if (*p < '0' || *p > '9') {
+                    digits = false;
+                    break;
+                }
+            }
+            if (digits) {
+                int n = std::atoi(v);
+                if (n > kSyncDepthMax) {
+                    std::printf("[bm64 state] BM64_SYNCTEST depth %d clamped to %d\n", n, kSyncDepthMax);
+                    n = kSyncDepthMax;
+                }
+                if (n >= 1) {
+                    e.synctest_depth = n;
+                }
+            }
+        }
     }
     if (const char* v = std::getenv("BM64_SAVETEST")) {
         e.savetest_len = std::atoi(v);
@@ -206,7 +259,8 @@ void configure() {
         }
     }
     if (e.synctest) {
-        std::printf("[bm64 state] SyncTest on (save, step, load, step, compare)\n");
+        e.sync_window.reserve(static_cast<size_t>(e.synctest_depth));
+        std::printf("[bm64 state] SyncTest on, rollback depth %d (save, step, load, step, compare)\n", e.synctest_depth);
     }
     if (e.savetest_len > 0) {
         std::printf("[bm64 state] Savetest at tick %d for %d ticks\n", e.savetest_start, e.savetest_len);
@@ -447,34 +501,55 @@ void step_end_tests(uint8_t* rdram) {
     }
     uint64_t hash = bm64::debug::hash_state(rdram);
     if (e.phase == Phase::Discarding) {
-        e.discard_hash = hash;
-        bm64::debug::range_hashes(rdram, e.discard_names, e.discard_ranges);
-        e.phase = Phase::CompareReady;
+        e.sync_window.emplace_back();
+        SyncFrame& frame = e.sync_window.back();
+        frame.hash = hash;
+        bm64::debug::range_hashes(rdram, frame.names, frame.ranges);
+        bm64::debug::copy_pads(frame.pads);
+        // A replay that runs out closes the window early so the tail is compared before exit.
+        if (e.sync_window.size() >= static_cast<size_t>(e.synctest_depth) || bm64::debug::input_replay_ended()) {
+            e.phase = Phase::CompareReady;
+        }
         return;
     }
     if (e.phase == Phase::Comparing) {
+        if (e.sync_index >= e.sync_window.size()) {
+            e.synctest_failed = true;
+            std::printf("BM64 SYNCTEST FAIL window\n");
+            std::fflush(stdout);
+            std::exit(1);
+        }
         e.synctest_ticks++;
-        if (hash != e.discard_hash) {
+        const SyncFrame& want = e.sync_window[e.sync_index];
+        if (hash != want.hash) {
+            e.synctest_failed = true;
             e.synctest_mismatches++;
             std::vector<std::string> names;
             std::vector<uint64_t> ranges;
             bm64::debug::range_hashes(rdram, names, ranges);
             std::printf("BM64 SYNCTEST FAIL tick %llu %016llx %016llx\n",
                 static_cast<unsigned long long>(e.sim),
-                static_cast<unsigned long long>(e.discard_hash),
+                static_cast<unsigned long long>(want.hash),
                 static_cast<unsigned long long>(hash));
-            for (size_t i = 0; i < names.size() && i < e.discard_ranges.size(); i++) {
-                if (names[i] != e.discard_names[i] || ranges[i] != e.discard_ranges[i]) {
+            for (size_t i = 0; i < names.size() && i < ranges.size() && i < want.ranges.size(); i++) {
+                if (i >= want.names.size() || names[i] != want.names[i] || ranges[i] != want.ranges[i]) {
                     std::printf("  %s %016llx %016llx\n", names[i].c_str(),
-                        static_cast<unsigned long long>(e.discard_ranges[i]),
+                        static_cast<unsigned long long>(i < want.ranges.size() ? want.ranges[i] : 0),
                         static_cast<unsigned long long>(ranges[i]));
                 }
             }
+            std::printf("  window frame %zu of %zu, depth %d\n",
+                e.sync_index + 1, e.sync_window.size(), e.synctest_depth);
             std::fflush(stdout);
             std::exit(1);
         }
-        e.phase = Phase::Idle;
-        e.speculative = false;
+        e.sync_index++;
+        if (e.sync_index >= e.sync_window.size()) {
+            e.sync_window.clear();
+            e.sync_index = 0;
+            e.phase = Phase::Idle;
+            e.speculative = false;
+        }
         return;
     }
     if (e.phase == Phase::Record) {
@@ -493,6 +568,15 @@ void step_end_tests(uint8_t* rdram) {
             finish_savetest();
         }
     }
+}
+
+// Replay reads the file again after the cursor restore. Live and record must not sample the device twice.
+void reuse_recorded_pads() {
+    Engine& e = eng();
+    if (bm64::debug::input_replaying() || e.sync_index >= e.sync_window.size()) {
+        return;
+    }
+    bm64::debug::set_pad_reuse(e.sync_window[e.sync_index].pads);
 }
 
 int begin_step(uint8_t* rdram) {
@@ -533,17 +617,28 @@ int begin_step(uint8_t* rdram) {
     }
     else if (e.phase == Phase::CompareReady) {
         if (!restore(rdram, e.dedicated.data(), e.dedicated.size())) {
+            e.synctest_failed = true;
             std::printf("BM64 SYNCTEST FAIL restore\n");
+            std::fflush(stdout);
             std::exit(1);
         }
         e.phase = Phase::Comparing;
+        e.sync_index = 0;
         spec = true;
         render = 0;
-        if (bm64::debug::input_cursor().mode == 0) {
-            uint8_t pads[24];
-            bm64::debug::copy_pads(pads);
-            bm64::debug::set_pad_reuse(pads);
-        }
+        reuse_recorded_pads();
+    }
+    else if (e.phase == Phase::Discarding) {
+        // The rest of the window. Still unrendered: a render-thread yield between the two passes
+        // can write game memory and fail the compare.
+        spec = true;
+        render = 0;
+        quiet = true;
+    }
+    else if (e.phase == Phase::Comparing) {
+        spec = true;
+        render = 0;
+        reuse_recorded_pads();
     }
     else if (bm64::online::active()) {
         render = bm64::online::begin_frame(rdram);
@@ -555,17 +650,26 @@ int begin_step(uint8_t* rdram) {
         render = 0;
     }
     else if (e.synctest && e.phase == Phase::Idle) {
-        e.phase = Phase::Discarding;
-        spec = true;
-        render = 0;
-        quiet = true;
+        if (bm64::debug::input_replay_ended()) {
+            // The open window was already compared. Don't start another on the way out.
+            spec = true;
+            render = 0;
+            quiet = true;
+        }
+        else {
+            e.phase = Phase::Discarding;
+            spec = true;
+            render = 0;
+            quiet = true;
+        }
     }
     else if (e.phase == Phase::Record || e.phase == Phase::Compare) {
         spec = true;
         render = 0;
     }
 
-    if (e.phase == Phase::Discarding || (e.phase == Phase::Record && !e.record_saved)) {
+    // Only the first step of a window. Later forward steps must keep this snapshot.
+    if ((e.phase == Phase::Discarding && e.sync_window.empty()) || (e.phase == Phase::Record && !e.record_saved)) {
         e.dedicated = capture(rdram);
         e.record_saved = e.phase == Phase::Record;
     }

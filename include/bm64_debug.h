@@ -27,6 +27,9 @@
 //   BM64_EXIT_ON_REPLAY_END=1 quit when the replay runs out of input
 //   BM64_EXIT_TICK=<n>        quit at tick n
 //   BM64_DISABLE_CHEATS=1     turn cheats off for this run (same switch netplay uses)
+//   BM64_SYNCTEST=<n>         savestate SyncTest, read in src/game/bm64_state.cpp. Unset or 0 is off.
+//                             1 (or any other non-numeric text) rolls back one tick. 2..12 roll back
+//                             that many ticks, then rerun them and compare. Above 12 is clamped to 12.
 namespace bm64::debug {
     // Shows or hides the debug overlay (F6). Safe to call from any thread once the game has started.
     void toggle_overlay();
@@ -55,6 +58,9 @@ namespace bm64::debug {
     // One-shot: the next controller sample is replaced with these 24 bytes.
     void set_pad_reuse(const uint8_t pads[24]);
     void copy_pads(uint8_t out[24]);
+    // Replay is feeding frames from the file. False once the file has run out, and false while recording.
+    bool input_replaying();
+    bool input_replay_ended();
     uint64_t tick();
     void set_tick(uint64_t tick);
     uint64_t hash_state(uint8_t* rdram);
