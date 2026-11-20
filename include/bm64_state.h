@@ -1,6 +1,7 @@
 #ifndef __BM64_STATE_H__
 #define __BM64_STATE_H__
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +29,12 @@ namespace bm64::state {
     // F5 / F7. Applied on the next main-loop step. Ignored until the game loop is running.
     void request_quicksave();
     void request_quickload();
+
+    // Phase 3.6. Printed once, from the normal quit path and from std::exit.
+    // speculative starts must stay 0: a real voice returned while the step was speculative.
+    // virtual ids reused: bm64_sound_enter saw a start that already had a virtual id.
+    void report_sound_counters();
+    void sound_counter_line(char* buf, size_t cap);
 }
 
 namespace bm64::proc {
