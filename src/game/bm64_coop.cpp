@@ -6,6 +6,7 @@
 #include "recomp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +30,9 @@ Session& sess() {
     static Session s;
     return s;
 }
+
+// Written by the input thread (F9), read by the game thread when it renders.
+std::atomic<int> g_view_player{ -1 };
 
 int32_t word(uint8_t* rdram, uint32_t addr) {
     return *reinterpret_cast<int32_t*>(rdram + (addr - 0x80000000u));
@@ -403,6 +407,28 @@ bool active() {
 
 int local_player() {
     return sess().local_player;
+}
+
+int view_player() {
+    int v = g_view_player.load();
+    return v >= 0 && v < sess().players ? v : sess().local_player;
+}
+
+void cycle_view() {
+    if (!sess().on) {
+        return;
+    }
+    int next = (view_player() + 1) % sess().players;
+    g_view_player.store(next);
+    std::printf("[bm64 coop] Viewing player %d\n", next + 1);
+}
+
+int session_players() {
+    return sess().on ? sess().players : 0;
+}
+
+bool unlimited_lives() {
+    return sess().unlimited;
 }
 
 bool omit_render_camera() {
@@ -784,7 +810,7 @@ extern "C" void bm64_camera_broadcast(uint8_t* rdram) {
 }
 
 extern "C" void bm64_camera_frame(uint8_t* rdram, recomp_context* ctx) {
-    int local = slot_of_player(rdram, sess().local_player);
+    int local = slot_of_player(rdram, bm64::coop::view_player());
     int primary = ram(rdram, bm64::coop::kCamMeta)[8];
     if (local == primary || !has_camera_block(rdram, local)) {
         return;

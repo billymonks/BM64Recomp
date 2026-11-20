@@ -12,6 +12,7 @@
 #include "zelda_game.h"
 #include "recomp_ui.h"
 #include "bm64_debug.h"
+#include "bm64_coop.h"
 #include "SDL.h"
 #include "promptfont.h"
 #include "GamepadMotion.hpp"
@@ -449,9 +450,13 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
             ) {
                 recompui::toggle_fullscreen();
             }
-            // F1-F4 are taken by RT64's developer shortcuts (which swallow the event), F8 by the RmlUi debugger, F11 by fullscreen.
+            // F1-F4 are taken by RT64's developer shortcuts (which swallow the event), F5/F7 by savestates,
+            // F8 by the RmlUi debugger, F11 by fullscreen.
             if (keyevent->keysym.scancode == SDL_Scancode::SDL_SCANCODE_F6 && ultramodern::is_game_started()) {
                 bm64::debug::toggle_overlay();
+            }
+            if (keyevent->keysym.scancode == SDL_Scancode::SDL_SCANCODE_F9 && ultramodern::is_game_started()) {
+                bm64::coop::cycle_view();
             }
             if (scanning_device != recomp::InputDevice::COUNT) {
                 if (keyevent->keysym.scancode == SDL_Scancode::SDL_SCANCODE_ESCAPE) {

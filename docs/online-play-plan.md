@@ -600,8 +600,8 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     - Render only the local player's block.
   - Done when: each instance follows its own bomber, and the hashes match across instances.
   - Steps:
-    1. [agent] Queue item 5 (local mode with F8 view switching).
-    2. [user] `BM64_COOP_LOCAL=2`, record `cam.bm64rec`. Press F8 to view player 2, turn player 2's camera with the C-buttons on controller 2, and walk player 2 around. The camera should follow player 2, and "up" on the stick should move away from the camera. Press F8 back to player 1; player 1's camera should be where it was left.
+    1. [agent] Queue item 5 (local mode with F9 view switching). Built 2026-11-20.
+    2. [user] `BM64_COOP_LOCAL=2`, record `cam.bm64rec`. Press F9 to view player 2, turn player 2's camera with the C-buttons on controller 2, and walk player 2 around. The camera should follow player 2, and "up" on the stick should move away from the camera. Press F9 back to player 1; player 1's camera should be where it was left.
     3. [agent, ask first] SyncTest `cam.bm64rec`. Pass: no failure. A failure in `slots` points at the camera blocks; check that every write to a block happens on the game thread inside a step.
     4. [user] The co-op checks in queue item 6, online, to confirm "hashes match across instances".
     5. [agent] Known gap to check: a camera command from a cutscene or overlay that writes the live camera without calling `func_80234778` or `func_802346C8` reaches only the first human's block. If step 2 shows a teammate's camera stuck after a cutscene, find the writer with `xref.py` on `0x8008F3D8`–`0x8008F438` and broadcast it the same way.
@@ -926,6 +926,12 @@ Every design below has been decided. If the code turns out to differ from what a
 - Build.
 - Replay `test.bm64rec` (version 1) twice; the hashes must still match.
 - Then hand the user: `$env:BM64_COOP_LOCAL = "2"; $env:BM64_RECORD = "coop1.bm64rec"; .\build\BM64Recompiled.exe`. Play a story stage with two controllers, then run `BM64_SYNCTEST=1` on `coop1.bm64rec`.
+
+**Done (2026-11-20), built but not run.**
+- `BM64_COOP_LOCAL=2..4` calls `set_session(n, 0, lives)` in `bm64::debug` init, before recording starts. It is ignored, with a message, when `BM64_NET` or `BM64_REPLAY` is set. `BM64_COOP_LIVES=unlimited` sets the lives flag; anything else means shared.
+- The view key is **F9**, not F8: F8 opens the RmlUi debugger, and F5 and F7 are savestates. `bm64::coop::cycle_view` stores the viewed player in a host atomic. `bm64_camera_frame` and the F6 overlay's "you" line read `view_player()`. Nothing in game memory changes.
+- Recordings are version 2: `u32 coop_players` (0 = none) and `u32 coop_unlimited_lives` follow `save_size`. Replay accepts versions 1 and 2. For a co-op file it calls `set_session` and marks ports 0..n−1 connected even when a pad stays idle.
+- Not run: replaying `test.bm64rec` (version 1) twice, and the user's co-op recording.
 
 ### 6. Runs for the user (3.8, 4.2, 4.7, 6.3, 6.5)
 

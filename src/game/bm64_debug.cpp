@@ -28,10 +28,12 @@ namespace {
     constexpr uint32_t num_ports = 4;
     constexpr uint32_t pad_size = 6; // OSContPad: u16 button, s8 stick_x, s8 stick_y, u8 errno (+ pad)
     constexpr char recording_magic[8] = { 'B', 'M', '6', '4', 'I', 'N', 'P', '\0' };
-    constexpr uint32_t recording_version = 1;
+    constexpr uint32_t recording_version = 2;
 
     // Recording layout (little-endian):
-    //   char magic[8]; u32 version; u32 seed; u32 save_size; u8 save[save_size];
+    //   char magic[8]; u32 version; u32 seed; u32 save_size;
+    //   version 2 only: u32 coop_players (0 = no co-op); u32 coop_unlimited_lives;
+    //   u8 save[save_size];
     //   then one 24-byte frame per controller read: 4 x { u16 button; s8 stick_x; s8 stick_y; u8 errno; u8 reserved; }
     constexpr std::streamoff seed_offset = 12;
 
@@ -586,6 +588,8 @@ namespace {
         write_pod(state.record_file, recording_version);
         write_pod(state.record_file, uint32_t{ 0 }); // seed, filled in by bm64_session_seed
         write_pod(state.record_file, static_cast<uint32_t>(save.size()));
+        write_pod(state.record_file, static_cast<uint32_t>(bm64::coop::session_players()));
+        write_pod(state.record_file, static_cast<uint32_t>(bm64::coop::unlimited_lives() ? 1 : 0));
         state.record_file.write(reinterpret_cast<const char*>(save.data()), save.size());
         state.record_file.flush();
         state.input_mode = InputMode::Record;
@@ -597,11 +601,15 @@ namespace {
         std::vector<uint8_t> data = read_file(path);
         size_t cursor = 0;
         char magic[8];
-        uint32_t version = 0, seed = 0, save_size = 0;
+        uint32_t version = 0, seed = 0, save_size = 0, coop_players = 0, coop_unlimited = 0;
         bool ok = data.size() >= sizeof(magic) && std::memcmp(data.data(), recording_magic, sizeof(magic)) == 0;
         cursor = sizeof(magic);
-        ok = ok && read_pod(data, cursor, version) && version == recording_version;
+        ok = ok && read_pod(data, cursor, version) && (version == 1 || version == recording_version);
         ok = ok && read_pod(data, cursor, seed) && read_pod(data, cursor, save_size);
+        if (ok && version >= 2) {
+            ok = read_pod(data, cursor, coop_players) && read_pod(data, cursor, coop_unlimited);
+            ok = ok && (coop_players == 0 || (coop_players >= 2 && coop_players <= num_ports));
+        }
         ok = ok && cursor + save_size <= data.size();
         if (!ok) {
             fprintf(stderr, "[bm64 debug] %s is not a valid BM64 recording; playing live\n", path);
@@ -629,9 +637,14 @@ namespace {
                 }
             }
         }
+        if (coop_players != 0) {
+            // Co-op players' pads were plugged in for the whole recording, idle or not.
+            state.replay_connected = static_cast<uint8_t>(state.replay_connected | ((1u << coop_players) - 1u));
+            bm64::coop::set_session(static_cast<int>(coop_players), 0, coop_unlimited != 0);
+        }
         state.input_mode = InputMode::Replay;
-        printf("[bm64 debug] Replaying %s: seed %08X, %zu input frames, save sandboxed\n",
-            path, seed, state.replay_frames.size() / (num_ports * pad_size));
+        printf("[bm64 debug] Replaying %s: version %u, seed %08X, %zu input frames, save sandboxed, co-op %u\n",
+            path, version, seed, state.replay_frames.size() / (num_ports * pad_size), coop_players);
     }
 
     const char* overlay_name(int32_t id, char* buf, size_t len) {
@@ -709,7 +722,7 @@ namespace {
         }
 
         if (bm64::coop::active()) {
-            int me = bm64::coop::local_player();
+            int me = bm64::coop::view_player();
             if (me < 0 || me >= bm64::coop::kPlayerSlots) {
                 me = 0;
             }
@@ -857,6 +870,22 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
         setup_replay(replay);
     }
     else {
+        if (const char* local = env("BM64_COOP_LOCAL")) {
+            int players = std::atoi(local);
+            const char* lives = env("BM64_COOP_LIVES");
+            bool unlimited = lives != nullptr && std::strcmp(lives, "unlimited") == 0;
+            if (env("BM64_NET") != nullptr) {
+                fprintf(stderr, "[bm64 coop] BM64_NET is set, so BM64_COOP_LOCAL is ignored\n");
+            }
+            else if (players < 2 || players > static_cast<int>(num_ports)) {
+                fprintf(stderr, "[bm64 coop] Ignoring BM64_COOP_LOCAL=%s (expected 2 to 4)\n", local);
+            }
+            else {
+                bm64::coop::set_session(players, 0, unlimited);
+                printf("[bm64 coop] Local co-op, %d players on controllers 1-%d, lives %s. F9 switches the view.\n",
+                    players, players, unlimited ? "unlimited" : "shared");
+            }
+        }
         if (const char* image = env("BM64_SANDBOX_IMAGE")) {
             std::vector<uint8_t> bytes = read_file(image);
             if (bytes.empty()) {

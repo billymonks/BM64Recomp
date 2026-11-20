@@ -4,7 +4,8 @@
 #include <cstdint>
 
 // Story co-op. The array the game uses is kPlayerBase (tools/re/relocate_players.py).
-// Inactive unless a net session has more than one player, so replays stay single-player.
+// Inactive unless a net session, BM64_COOP_LOCAL or a version 2 recording has more than one
+// player, so older replays stay single-player.
 // Spawn and update loops visit all kPlayerSlots. Empty slots stay controlType 0.
 namespace bm64::coop {
 
@@ -42,8 +43,13 @@ constexpr uint32_t kRuleBase = kCamStateEnd;
 constexpr uint32_t kStateEnd = kRuleBase + 0x60;
 
 int local_player();
+// The session player whose camera is rendered. Host-only: it never touches game memory.
+int view_player();
+void cycle_view();
 
 void set_session(int players, int local_player, bool unlimited_lives);
+int session_players();
+bool unlimited_lives();
 void note_overlay(int overlay_id);
 bool active();
 bool omit_render_camera();
