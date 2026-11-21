@@ -893,10 +893,52 @@ typedef struct Player {
 #define g_Players ((Player*)0x80F00000)
 extern u32 D_802AC624; // lives
 
-// Same word the ROM getter loads. In a co-op session the caller's return address picks the
-// category (src/game/bm64_player_sites.inc); with no session this word is returned unchanged.
+// Same word the ROM getter loads. In a co-op session the call site picks the category
+// (src/game/bm64_player_sites.inc); with no session this word is returned unchanged.
+// Recompiled jal does not write $ra, so the site comes from a toml hook at each listed call.
 RECOMP_PATCH s32 func_80243DDC(void) {
-    return bm64_main_player((u32)__builtin_return_address(0));
+    return bm64_main_player();
+}
+
+// Grid-cell box tests used by goals, exits and switches. The leader is tested exactly as the
+// ROM does, through its cached cell in D_802ACEC8 (5 entries). In a story co-op session every
+// other living human is tested too, with the cell in a local, since slots 5-7 have no entry.
+extern s32 D_802AC894;
+extern s32 D_802ACEC8[5][3];
+void func_802454F8(s32 slot, s32* cell);
+
+static s32 bm64_cell_in_box(s32* c, s32 x0, s32 y0, s32 z0, s32 x1, s32 y1, s32 z1) {
+    return c[0] >= x0 && c[2] >= z0 && c[0] <= x1 && c[2] <= z1 && c[1] >= y0 && c[1] <= y1;
+}
+
+static s32 bm64_any_player_in_box(s32 x0, s32 y0, s32 z0, s32 x1, s32 y1, s32 z1) {
+    s32 leader = D_802AC894;
+    s32 cell[3];
+    s32 i;
+    func_802454F8(leader, D_802ACEC8[leader]);
+    if (bm64_cell_in_box(D_802ACEC8[leader], x0, y0, z0, x1, y1, z1)) {
+        return 1;
+    }
+    for (i = 0; i < 8; i++) {
+        if (i == leader || !bm64_coop_trigger_slot(i)) {
+            continue;
+        }
+        func_802454F8(i, cell);
+        if (bm64_cell_in_box(cell, x0, y0, z0, x1, y1, z1)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Leader in the cell rectangle [x0, x1] x [z0, z1], any floor.
+RECOMP_PATCH s32 func_802457D8(s32 x0, s32 z0, s32 x1, s32 z1) {
+    return bm64_any_player_in_box(x0, -0x7FFFFFFF - 1, z0, x1, 0x7FFFFFFF, z1);
+}
+
+// Leader in the cell rectangle [x0, x1] x [z0, z1] on floor y.
+RECOMP_PATCH s32 func_802456FC(s32 x0, s32 y, s32 z0, s32 x1, s32 z1) {
+    return bm64_any_player_in_box(x0, y, z0, x1, y, z1);
 }
 extern u32 D_802AC628; // credits
 

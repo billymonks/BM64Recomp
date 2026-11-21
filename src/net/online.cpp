@@ -604,6 +604,8 @@ void end_frame(uint8_t* rdram, uint64_t hash) {
         }
         auto path = dir / ("player" + std::to_string(r.player) + "_tick_" + std::to_string(r.session->desync_tick()) + ".bin");
         bm64::debug::dump_to(rdram, path);
+        bm64::debug::dump_slots_to(rdram + (bm64::debug::kSlotDumpBase - 0x80000000u),
+            dir / ("player" + std::to_string(r.player) + "_tick_" + std::to_string(r.session->desync_tick()) + ".slots.bin"));
         std::printf("BM64 DESYNC tick %llu local_hash %016llx\n",
             static_cast<unsigned long long>(r.session->desync_tick()),
             static_cast<unsigned long long>(r.session->local_hash_at(r.session->desync_tick())));

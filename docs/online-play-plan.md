@@ -576,6 +576,7 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     3. [user] With `BM64_COOP_LOCAL=4` and four controllers, enter each map. Note whether four bombers appear next to each other and each answers its own pad. Send the log. Spot-check 2 and 3 players on the first map of each world and on the six rival maps.
     4. [agent] Fill the checklist from the log lines. A map where `fit X of Y` appears needs a different slot plan: find which slots that map's overlay reserves (`xref.py` for `setControlType` in that overlay) and add a per-map exception next to the rival-map list.
     5. Tick when every row is filled and passing.
+  - Note (fix, 2026-11-21): co-op learned the overlay id only from `bm64_debug_tick`, which reports it after stage setup has already run in the overlay's first tick. So the first stage entered from a menu was set up solo: in co-op director runs of maps 4.1 and 4.10, slot 1 stayed empty and the port map stayed zero, while 5.1 got two bombers only after a story-to-story transition. `bm64_load_barrier` (called by the patched loader after every load with `gOverlayID`) and snapshot restore now also call `bm64::coop::note_overlay`.
   - Note: `bm64_coop_before_stage` runs at the start of `func_80245CDC` when the session has more than one player. It sets `controlType` 1 on empty slots, skipping 1–3 on the six rival maps, and copies the leader's spawn position onto each new teammate with a 40-unit step along X. `g_SpawnPlayer` copies those floats onto the bomber. It logs when the 8-slot loop cannot fit everyone. No story map was entered.
   - Note (audit fix, 2026-11-19): bombers read the controller port equal to their slot, and the pad history has four ports with no bounds check, so slots 4–7 on rival maps read memory past the ring. Stage setup now writes a port map (rule block bytes `0x58`–`0x5F`): the n-th co-op slot reads session player n's port, and slots 1–3 on rival maps read nothing. Hooks at the entry of the eight accessors that take a port in `a0` (`func_802399AC`, `func_80239E88`, `func_80239FF8`, `func_80239E28`, `func_80239F70`, `func_80239EE8`, `func_80239714`, `func_802395A8`) apply it. Rival maps are recognised by bank and sub-overlay, not by raw overlay id. A menu that reads port 1–3 during a rival map would also read nothing; not seen.
 - [ ] **6.4 Main-player virtualization framework**
@@ -588,7 +589,8 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     3. [agent] Override test hook: `BM64_COOP_OVERRIDE=<category>:<slot>` (for example `camera:1`) writes the override byte for that category at boot of a local co-op session. The overrides live at `0x80F00820`, one per category, `0xFF` meaning none.
     4. [user] `BM64_COOP_LOCAL=2 BM64_COOP_OVERRIDE=enemy:1` in a stage with enemies: every enemy should chase player 2. Then `enemy:0`: they chase player 1.
     5. Tick when steps 2 and 4 pass.
-  - Note: with no session, `bm64_main_player(caller)` returns `D_802AC894`, so single-player replays stay on the hero. In a session the call site is looked up in `bm64_player_sites.inc`, and an unlisted site falls back to the running process in `bm64_player_cats.inc` (queue item 4, 2026-11-20). Enemy and trigger entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot.
+  - Note (2026-11-21): step 3 is built. `BM64_COOP_OVERRIDE=<category>:<slot>` takes the names `other`, `camera`, `enemy`, `trigger`, `cutscene`, `hud` and `rival`. It writes the byte after boot only when a co-op session exists (local mode or a co-op replay). The value is not stored in recordings, so replaying an override session needs the same variable. A `camera` override is overwritten by every per-player camera pass. Not run.
+  - Note: with no session, `bm64_main_player()` returns `D_802AC894`, so single-player replays stay on the hero. In a session the call site is looked up in `bm64_player_sites.inc`, and an unlisted site falls back to the running process in `bm64_player_cats.inc` (queue item 4, 2026-11-20). Enemy and trigger entries use the 6.6 sticky target. Other categories return the leader. Eight override bytes at `0x80F00820` (`0xFF` means none) are in the snapshot.
   - Note (2026-11-19): the 22 direct `lw`s of `D_802AC894` (every reader except the patched getter) are hooks that store `bm64_resolved_slot` into the register the load just wrote. The three `sw`s and `func_80245868`'s address calculation stay writers. With no session the function returns that word, so the register does not change. `func_80236F54` is treated as a camera process even though it has no catalogue row. After replay started rewriting `0x802AC400` from the ports the file uses, two replays of `test.bm64rec` matched on all 9,591 ticks in every range, and the save was unchanged. A third pass with `BM64_CAMERA_BIAS` still differs in `bss` and `heap`, which is the lookAt matrix and the camera process stack from phase 2.5.
 - [ ] **6.5 Per-player cameras**
   - Depends on: 6.4.
@@ -635,6 +637,12 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     4. [agent] Don't change `D_802AC894` when someone else clears the stage. Camera block 0, the port map and checkpoints all assume the leader stays slot 0.
     5. [user] For each stage in `docs/coop-map-checklist.md`: player 1 waits at the start while player 2 reaches the goal. Pass: the stage clears for both.
     6. Tick when every stage row passes.
+  - Note (2026-11-21), steps 2 and 3:
+    - Map 4.1's goal: `func_ovl4_1_80047074` calls `func_ovl4_1_800454C0` each frame. That function asks `func_802457D8(5, 0x1A, 5, 0x1A)` and `func_802457D8(0x2C, 0x16, 0x2C, 0x16)`, which test whether the main player's grid cell is inside an inclusive x/z rectangle. If one is true and `func_8028A1DC(0x416 or 0x417)` is false, it runs `func_ovl4_1_800452F4` with that exit's object. That function plays the goal sequence (`func_80250E2C(1)`) and requests scene `0x29` (`func_8023AE6C`).
+    - `func_802457D8` (152 calls in 48 overlays) and `func_802456FC` (39 calls in 17 overlays; same test plus an exact floor `y`) are the shared "main player in box" tests. `func_802455A8` (box with a y range) has no callers.
+    - Both are now `RECOMP_PATCH`es in `required_patches.c`. They test the leader first, exactly as the ROM does, including the write of its cell to `D_802ACEC8[leader]`. If that fails and `bm64_coop_trigger_slot(i)` says slot i is a human with a body in a story session, they test each such slot with the cell in a local, because `D_802ACEC8` has only 5 entries. With no session the result and the memory writes match the ROM.
+    - `D_802AC894` is not changed, so the goal sequence still acts on the leader (step 4). The toml reader hooks inside those two functions no longer run, because the patch replaces the function.
+    - Not watched. No co-op director run reaches a goal.
   - Note (2026-11-20, replaces the 2026-11-19 note): the six main-code "trigger" functions turned out to be hero routines that act on the bomber they read, so their sites now resolve to the leader (queue item 4). No call site is in the trigger category yet; step 2 must find the goal test first.
   - Old note (2026-11-19): a process whose entry is one of the six trigger functions resolves the main player through the same sticky nearest-living-bomber rule as an enemy. The goal's own distance test was not rewritten, and the canonical word `D_802AC894` is not changed to the player who touched it. Not watched in a stage.
   - Note (audit, 2026-11-19): this rule cannot fire. The catalogue records the function that contains each call, but the resolver looks up the running process's entry function. The six trigger functions are only reached by `jal` from other code, never as a process entry, so no process ever matches them. Queue item 4 keys the lookup on the call site instead, which also fixes enemies whose `getMainPlayer` call sits in a helper.
@@ -905,9 +913,9 @@ Every design below has been decided. If the code turns out to differ from what a
 **Done (2026-11-20), except the replay check.**
 - `catalogue_main_player.py --emit` reports 626 call sites in 312 functions and writes `src/game/bm64_player_sites.inc` with 300 rows: 292 enemy or boss, 2 camera, and the 6 hero-routine sites forced to other. Only rows that differ from "other" are written, plus those 6, because an unlisted site already falls back to the process entry. The six functions are no longer rows in `bm64_player_cats.inc`.
 - Trigger semantics: all six act on the bomber they read (goal or warp sequence, table reset, animation state, grid placement, slot position; details in "Main-player sequences" in `game-internals.md`). None tests whether the player reached the goal, so all six are "other". The goal test is in the stage overlays and is still 6.7 step 2.
-- The patched getter passes `__builtin_return_address(0)`. The recompiled patch begins `ctx->r4 = ctx->r31` before calling `bm64_main_player`, so the argument is the caller's return address. Overlay calls reach the getter through `exec_zerojmp_func`, which does not write `r31`, so overlay sites keep their own address.
+- Correction (2026-11-21): the first version passed `__builtin_return_address(0)` from the patched getter. The replay caller log showed `00000000` for every call: recompiled `jal` is a plain C call and never writes `ctx->r31`, so `$ra` is stale or 0. It is replaced by 294 generated toml hooks, one before each listed `getMainPlayer` call, that call `bm64_main_site(call + 8)`. `bm64_main_player` takes and clears that value. `catalogue_main_player.py --emit` writes the block to `tools/re/main_player_site_hooks.toml`, and `tools/re/_splice_site_hooks.py` replaces it in `bm64.us.toml` between `# BEGIN/END bm64 main-player call sites`.
 - The 22 direct-read hooks call `bm64_resolved_slot_at(rdram, <lw address>)` (scripted edit of the toml block; `_emit_reader_hooks.py` emits the same text). After `-Regen`, all 22 are in `RecompiledFuncs` and no `bm64_resolved_slot(` call is left.
-- `BM64_LOG_MAIN_CALLERS=1` prints the return addresses of the first ten `getMainPlayer` calls.
+- `BM64_LOG_MAIN_CALLERS=1` prints the site of the first ten `getMainPlayer` calls (0 for an unlisted call).
 - Replay check (2026-11-21, after item 5 was also built): two no-session replays of `test.bm64rec` (`runs\item4_a`, `runs\item4_b`) matched on all 9,591 ticks in every range. The file loaded as version 1 with co-op 0. No log from before items 1–5 was kept, so this shows the two runs agree with each other, not that they equal the old build. `new.bm64rec` was not replayed.
 
 ### 5. Local co-op mode (enables all phase 6 testing)
@@ -951,7 +959,26 @@ Hand these over as numbered steps. Don't run them yourself without asking. Each 
 
 When a run fails, the dumps are in `desync/`. Run `python tools/re/dumpdiff.py desync/player0_tick_N.bin desync/player1_tick_N.bin --ranges all`, map the first differing address with `tools/re/find.py`, and add the finding to the matching item before fixing anything.
 
-Trap: dumps cover only `0x80000000`–`0x80800000`. If the `slots` column is the one that differs (player array and co-op state at `0x80F00000`), the dump shows nothing there. Before chasing it, extend `bm64::debug::dump_to` to also write `0x80F00000`–`kStateEnd` to a second file, and diff that file.
+Dumps cover only `0x80000000`–`0x80800000`. Since 2026-11-21 every dump also writes a `<name>.slots.bin` with `0x2000` bytes from `0x80F00000` (the player array and co-op state up to `kStateEnd`), big-endian like the main dump. This covers tick dumps, `desync/` dumps and SyncTest `forward_`/`rerun_` dumps. If the `slots` column differs, diff those files; byte offset `n` is address `0x80F00000 + n`.
+
+### Overnight runs (2026-11-21)
+
+Unattended runs with the user's permission. No one watched a window.
+
+- **No-session replays of `test.bm64rec`.** Each build's two replays were identical on all 9,591 ticks (`runs\q4_test_*`, `runs\q4b_test_*`, `runs\final_test_a`). Between builds, `game` differs from tick 0 and `bss` on ticks 5847–5996 and 8733–8802. Proven cause, using a build without the box-test patches (`runs\dbg_nobox_test`, `bss` identical to the old build): at tick 5900 the only differences are 9 words in process 2's stack (the patched `func_802457D8` spills its arguments at other offsets) and `D_802B36AC`, which holds the address of the patch function `free_hook` that moved. Game state is unchanged. A log from an older build is therefore not a valid reference for a newer one; compare two runs of the same build.
+- **Co-op director SyncTests** (`$env:BM64_COOP_LOCAL = "2"`, `tools\run-synctest-scenes.ps1 -Secs 30`, `runs\st\coop3`). Every log shows "Per-player cameras, 2 bombers".
+
+| Scene | Map | Ticks | Depth 1 | Depth 12 |
+|---|---|---|---|---|
+| `0x28` | 4.1 | 2401 | PASS | PASS |
+| `0x31` | 4.10 (rival) | 1200 | PASS | PASS |
+| `0x38` | 5.1 (bounced through 6.9, 7.1 and 4.2) | 2401 | PASS | PASS |
+| `0x48` | 6.1 | 2401 | PASS | PASS |
+| `0x58` | 7.1 | 2401 | PASS | PASS |
+
+- An earlier pass (`runs\st\coop2`, before the overlay-id fix under 6.3) also passed, but on 4.1 and 4.10 player 2 never spawned, so only 5.1 had two bombers. That run is how the bug was found.
+- **Open: heap on 4.10 with co-op.** The 4.10 recording stopped at tick 1200 with `Allocation failed: file 0x323 size 0x7910 slot 11`. The solo director run of the same scene loads `0x323` without failing. The director warps there from the title, and the same warp was the whole cause of the Battle heap failures (see "Heap exhaustion in Battle" in `game-internals.md`), so this may be a director effect. Check: in local co-op, reach 4.10 through the world map and play past the first minute. If it fails there too, the extra bomber on a 5-bomber map overflows the 1 MB heap.
+- Director co-op input drives port 0 only. Player 2 stands still, so these runs cover spawning, cameras, the port map, respawns and enemy targeting near an idle teammate, not two players moving.
 
 ## Risks and fallbacks
 

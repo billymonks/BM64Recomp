@@ -24,6 +24,9 @@
 #include "bm64_online.h"
 #include "bm64_coop.h"
 
+static_assert(bm64::debug::kSlotDumpBase == bm64::coop::kPlayerBase &&
+              bm64::debug::kSlotDumpBase + bm64::debug::kSlotDumpBytes >= bm64::coop::kStateEnd);
+
 namespace {
     constexpr uint32_t num_ports = 4;
     constexpr uint32_t pad_size = 6; // OSContPad: u16 button, s8 stick_x, s8 stick_y, u8 errno (+ pad)
@@ -545,6 +548,8 @@ namespace {
             snprintf(line, sizeof(line), "%08X %08X\n", m.start, m.end);
             mask_out << line;
         }
+        bm64::debug::dump_slots_to(rdram + (bm64::debug::kSlotDumpBase - 0x80000000u),
+            state.dump_dir / ("tick_" + std::to_string(state.tick) + ".slots.bin"));
         printf("[bm64 debug] Dumped RDRAM at tick %llu to %s\n", (unsigned long long)state.tick, path.string().c_str());
     }
 
@@ -595,6 +600,33 @@ namespace {
         state.input_mode = InputMode::Record;
         printf("[bm64 debug] Recording input to %s (save image %zu bytes, file %s)\n",
             path, save.size(), save_path.string().c_str());
+    }
+
+    // BM64_COOP_OVERRIDE=<category>:<slot>. Not stored in recordings: a replay needs the same variable.
+    // The camera byte is rewritten by every per-player camera pass, so a camera override does not stick.
+    void apply_coop_override(uint8_t* rdram, const char* text) {
+        static const char* const names[] = { "other", "camera", "enemy", "trigger", "cutscene", "hud", "rival" };
+        const char* colon = std::strchr(text, ':');
+        int category = -1;
+        if (colon != nullptr) {
+            std::string name(text, colon);
+            for (int i = 0; i < static_cast<int>(std::size(names)); i++) {
+                if (name == names[i]) {
+                    category = i;
+                }
+            }
+        }
+        int slot = colon != nullptr ? std::atoi(colon + 1) : -1;
+        if (category < 0 || slot < 0 || slot >= bm64::coop::kPlayerSlots || colon[1] < '0' || colon[1] > '9') {
+            fprintf(stderr, "[bm64 coop] Ignoring BM64_COOP_OVERRIDE=%s (expected enemy:1, trigger:0, ...)\n", text);
+            return;
+        }
+        if (bm64::coop::session_players() == 0) {
+            fprintf(stderr, "[bm64 coop] BM64_COOP_OVERRIDE needs a co-op session (BM64_COOP_LOCAL); ignored\n");
+            return;
+        }
+        rdram[(bm64::coop::kOverrideBase - 0x80000000u) + static_cast<uint32_t>(category)] = static_cast<uint8_t>(slot);
+        printf("[bm64 coop] Category %s always resolves to slot %d\n", names[category], slot);
     }
 
     void setup_replay(const char* path) {
@@ -911,6 +943,9 @@ extern "C" void bm64_debug_boot(uint8_t* rdram, recomp_context* ctx) {
             }
         }
     }
+    if (const char* text = env("BM64_COOP_OVERRIDE")) {
+        apply_coop_override(rdram, text);
+    }
     bm64::online::handshake();
 }
 
@@ -1059,8 +1094,11 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
         // osContGetQuery fills 0x802AC400 from the devices this process opened. A replay has
         // no record of that, so derive it from which ports the file actually uses.
         if (state.input_mode == InputMode::Replay || (state.input_mode == InputMode::Record && director.on)) {
-            // A director recording uses port 0 only, which is what its replay derives.
-            uint8_t connected = state.input_mode == InputMode::Replay ? state.replay_connected : uint8_t{ 0x1 };
+            // A director recording uses port 0 only, which is what its replay derives. Co-op players'
+            // ports count as connected, as a co-op replay marks them.
+            int coop = bm64::coop::session_players();
+            uint8_t director_mask = static_cast<uint8_t>(coop > 1 ? (1u << coop) - 1u : 0x1u);
+            uint8_t connected = state.input_mode == InputMode::Replay ? state.replay_connected : director_mask;
             for (uint32_t port = 0; port < num_ports; port++) {
                 uint8_t* status = rdram + (0x802AC400u - 0x80000000u) + port * 4u;
                 bool present = (connected & (1u << port)) != 0;
@@ -1355,6 +1393,20 @@ void dump_to(uint8_t* rdram, const std::filesystem::path& path) {
     std::ofstream out{ path, std::ios::binary };
     out.write(reinterpret_cast<const char*>(words.data()), static_cast<std::streamsize>(words.size() * 4));
     std::printf("[bm64 debug] Wrote %s\n", path.string().c_str());
+}
+
+void dump_slots_to(const uint8_t* slots, const std::filesystem::path& path) {
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    std::vector<uint32_t> words(kSlotDumpBytes / 4);
+    std::memcpy(words.data(), slots, words.size() * 4);
+    for (uint32_t& w : words) {
+        w = (w >> 24) | ((w >> 8) & 0xFF00) | ((w << 8) & 0xFF0000) | (w << 24);
+    }
+    std::ofstream out{ path, std::ios::binary };
+    out.write(reinterpret_cast<const char*>(words.data()), static_cast<std::streamsize>(words.size() * 4));
 }
 
 } // namespace bm64::debug

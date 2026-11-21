@@ -35,7 +35,8 @@ struct SyncFrame {
     std::vector<std::string> names;
     std::vector<uint64_t> ranges;
     uint8_t pads[24]{};
-    // Only with BM64_SYNCTEST_DUMP: RDRAM 0x80000000-0x80800000 after the forward step.
+    // Only with BM64_SYNCTEST_DUMP: RDRAM 0x80000000-0x80800000 after the forward step, then
+    // kSlotDumpBytes from kSlotDumpBase.
     std::vector<uint8_t> image;
     std::vector<bm64::debug::ProcessStack> stacks;
 };
@@ -474,6 +475,7 @@ bool restore(uint8_t* rdram, const uint8_t* data, size_t size) {
     bm64::debug::set_input_cursor(cursor);
     e.overlay = overlay;
     e.have_overlay = true;
+    bm64::coop::note_overlay(overlay);
     e.scroll = scroll;
     e.boot_timer = boot_timer;
     e.load_us = micros(t0, std::chrono::steady_clock::now());
@@ -559,6 +561,8 @@ void step_end_tests(uint8_t* rdram) {
         bm64::debug::copy_pads(frame.pads);
         if (!e.synctest_dump.empty()) {
             frame.image.assign(rdram, rdram + 0x800000);
+            const uint8_t* slots = rdram + (bm64::debug::kSlotDumpBase - 0x80000000u);
+            frame.image.insert(frame.image.end(), slots, slots + bm64::debug::kSlotDumpBytes);
             bm64::debug::get_process_stacks(frame.stacks);
         }
         // A replay that runs out closes the window early so the tail is compared before exit.
@@ -601,11 +605,14 @@ void step_end_tests(uint8_t* rdram) {
                 for (size_t i = 0; i <= e.sync_index; i++) {
                     const std::string tick = std::to_string(first + i);
                     bm64::debug::dump_to(e.sync_window[i].image.data(), dir / ("forward_" + tick + ".bin"));
+                    bm64::debug::dump_slots_to(e.sync_window[i].image.data() + 0x800000, dir / ("forward_" + tick + ".slots.bin"));
                     write_stacks(dir / ("forward_" + tick + ".stacks"), e.sync_window[i].stacks);
                 }
                 std::vector<bm64::debug::ProcessStack> stacks;
                 bm64::debug::get_process_stacks(stacks);
                 bm64::debug::dump_to(rdram, dir / ("rerun_" + std::to_string(e.sim) + ".bin"));
+                bm64::debug::dump_slots_to(rdram + (bm64::debug::kSlotDumpBase - 0x80000000u),
+                    dir / ("rerun_" + std::to_string(e.sim) + ".slots.bin"));
                 write_stacks(dir / ("rerun_" + std::to_string(e.sim) + ".stacks"), stacks);
             }
             std::fflush(stdout);
@@ -989,6 +996,9 @@ extern "C" void bm64_load_barrier(uint8_t* rdram, recomp_context* ctx) {
     (void)rdram;
     int32_t overlay = _arg<0, int32_t>(rdram, ctx);
     bm64::state::eng().overlay = overlay;
+    // Stage setup (func_80245CDC) runs during this overlay's first tick, before bm64_debug_tick
+    // reports the new id, so co-op must learn it here or the first stage after a menu is solo.
+    bm64::coop::note_overlay(overlay);
     if (bm64::online::active()) {
         bm64::online::note_barrier(overlay);
     }

@@ -109,3 +109,4 @@ bm64_step_end = 0x8F000184;
 bm64_load_barrier = 0x8F000188;
 bm64_main_player = 0x8F00018C;
 bm64_camera_frame = 0x8F000190;
+bm64_coop_trigger_slot = 0x8F000194;

@@ -467,8 +467,17 @@ void apply_rules(uint8_t* rdram) {
 
 } // namespace bm64::coop
 
+// Set by the "main-player call sites" hooks in bm64.us.toml right before a listed getMainPlayer
+// call, and taken by that call. Game thread only; never outlives the call.
+static uint32_t g_main_site = 0;
+
+extern "C" void bm64_main_site(uint32_t site) {
+    g_main_site = site;
+}
+
 extern "C" void bm64_main_player(uint8_t* rdram, recomp_context* ctx) {
-    uint32_t caller = _arg<0, uint32_t>(rdram, ctx);
+    uint32_t caller = g_main_site;
+    g_main_site = 0;
     static const bool log_callers = std::getenv("BM64_LOG_MAIN_CALLERS") != nullptr;
     if (log_callers) {
         static int logged = 0;
@@ -482,6 +491,17 @@ extern "C" void bm64_main_player(uint8_t* rdram, recomp_context* ctx) {
 
 extern "C" int bm64_resolved_slot_at(uint8_t* rdram, uint32_t site) {
     return resolved_slot(rdram, site);
+}
+
+// Whether the goal and switch box tests (func_802457D8, func_802456FC) also check this slot:
+// a human bomber with a body, in a story co-op session.
+extern "C" void bm64_coop_trigger_slot(uint8_t* rdram, recomp_context* ctx) {
+    int slot = _arg<0, int32_t>(rdram, ctx);
+    uint32_t body = 0;
+    bool ok = story() && slot >= 0 && slot < bm64::coop::kPlayerSlots &&
+              word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride + 0x24) == 1 &&
+              slot_body(rdram, slot, body);
+    _return(ctx, ok ? 1 : 0);
 }
 
 // func_80248148 is about to take the hearts==0 path. t0 holds the heart count.

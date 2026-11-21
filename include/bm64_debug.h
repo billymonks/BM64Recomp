@@ -74,6 +74,11 @@ namespace bm64::debug {
     void set_quiet_log(bool quiet);
     bool booted();
     void dump_to(uint8_t* rdram, const std::filesystem::path& path);
+    // The player array and co-op state, 0x80F00000 up to bm64::coop::kStateEnd, which dump_to does
+    // not reach. `slots` points at the host copy of 0x80F00000. Big-endian, like dump_to.
+    constexpr uint32_t kSlotDumpBase = 0x80F00000;
+    constexpr uint32_t kSlotDumpBytes = 0x2000;
+    void dump_slots_to(const uint8_t* slots, const std::filesystem::path& path);
 }
 
 #endif
