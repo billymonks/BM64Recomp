@@ -908,7 +908,7 @@ Every design below has been decided. If the code turns out to differ from what a
 - The patched getter passes `__builtin_return_address(0)`. The recompiled patch begins `ctx->r4 = ctx->r31` before calling `bm64_main_player`, so the argument is the caller's return address. Overlay calls reach the getter through `exec_zerojmp_func`, which does not write `r31`, so overlay sites keep their own address.
 - The 22 direct-read hooks call `bm64_resolved_slot_at(rdram, <lw address>)` (scripted edit of the toml block; `_emit_reader_hooks.py` emits the same text). After `-Regen`, all 22 are in `RecompiledFuncs` and no `bm64_resolved_slot(` call is left.
 - `BM64_LOG_MAIN_CALLERS=1` prints the return addresses of the first ten `getMainPlayer` calls.
-- Not run: the two no-session replays of `test.bm64rec`. Listed with the other "ask first" checks.
+- Replay check (2026-11-21, after item 5 was also built): two no-session replays of `test.bm64rec` (`runs\item4_a`, `runs\item4_b`) matched on all 9,591 ticks in every range. The file loaded as version 1 with co-op 0. No log from before items 1–5 was kept, so this shows the two runs agree with each other, not that they equal the old build. `new.bm64rec` was not replayed.
 
 ### 5. Local co-op mode (enables all phase 6 testing)
 
@@ -931,7 +931,7 @@ Every design below has been decided. If the code turns out to differ from what a
 - `BM64_COOP_LOCAL=2..4` calls `set_session(n, 0, lives)` in `bm64::debug` init, before recording starts. It is ignored, with a message, when `BM64_NET` or `BM64_REPLAY` is set. `BM64_COOP_LIVES=unlimited` sets the lives flag; anything else means shared.
 - The view key is **F9**, not F8: F8 opens the RmlUi debugger, and F5 and F7 are savestates. `bm64::coop::cycle_view` stores the viewed player in a host atomic. `bm64_camera_frame` and the F6 overlay's "you" line read `view_player()`. Nothing in game memory changes.
 - Recordings are version 2: `u32 coop_players` (0 = none) and `u32 coop_unlimited_lives` follow `save_size`. Replay accepts versions 1 and 2. For a co-op file it calls `set_session` and marks ports 0..n−1 connected even when a pad stays idle.
-- Not run: replaying `test.bm64rec` (version 1) twice, and the user's co-op recording.
+- Version 1 replay: `test.bm64rec` replayed twice with identical hashes (see item 4). Not run: the user's co-op recording.
 
 ### 6. Runs for the user (3.8, 4.2, 4.7, 6.3, 6.5)
 
