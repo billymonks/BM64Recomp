@@ -707,6 +707,7 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
   - Done when: all six are completable.
   - Steps:
     1. [agent] 6.3, 6.6, 6.7 and 6.9 first. Rival control code uses constant slots 1–3 (category "rival-bomber control"), which must stay as they are. Whether rivals pick their target through `getMainPlayer` is not known: before step 2, read one rival overlay's control code with `bmdis.py` and record how it chooses whom to chase.
+       - Answered (2026-11-22): not through `getMainPlayer`. `func_8025DC60` aims every rival at slot 0 and story never re-picks; co-op now turns rivals to the nearest human. See "Rival ignores player 2" below the queue and "Computer-bomber AI" in `game-internals.md`.
     2. [user] Each of 4.10, 5.7, 6.15, 8.13, 9.5 and 9.6 in local co-op with 4 players: play until clear. Note whether rivals attack teammates, whether any co-op bomber is ignored, and whether the clear condition ("all rivals defeated") works.
     3. [agent] If clearing doesn't trigger, the overlay may count living bombers over all slots and see the co-op humans as rivals. Find the count loop (`xref.py` on the player array in that overlay) and make it count only slots 1–3 on rival maps.
     4. Tick when all six rows pass.
@@ -1085,6 +1086,30 @@ User report (check 1, `coop_410c.bm64rec`): on 4.10 player 2 stopped animating a
   - Co-op director SyncTests with the fixed colors, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=buttons`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\colfix`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each.
   - `coop_410b.bm64rec` (4,453 ticks) and `coop_410c.bm64rec` (7,962 ticks): SyncTest passes at depths 1 and 12 (`runs\st\colfix_coop_410*`).
 - One replay during this work (`runs\c410\out2.txt`) stopped with a fail-fast exception (`0xC0000409`, attributed to `bm64_state.cpp` around the snapshot segment list) at the 4.10 load; the identical rerun passed. Not reproduced since; recorded here in case it returns.
+
+### User check 1 on 4.10, third run (`coop_410d.bm64rec`, 2026-11-22)
+
+The user played local co-op with two controllers through the world map to 4.10 again, on the build with the collision fix and fixed colors, and cleared it (the log returns to overlay 3.2 at tick ~7550).
+
+- Report, as given: player 1 white and player 2 black; player 2 kept animating and touching the rival did not push them off the stage; "the rival stopped fighting for a bit a while into the fight, and then started fighting again later". The title demo showed no second bomber (reported on the run before).
+- Not covered by this run: 4 players, the other rival maps (6.12), and anything about cutscenes beyond the fight.
+
+### Rival ignores player 2 (2026-11-22)
+
+Investigated by replay of `coop_410d.bm64rec` (the replay reproduces the session: the same respawn and separation-push lines as the live log) with `BM64_COOP_TRACE=20`.
+
+- **The pause.** The rival (slot 1) stood still from tick 4660 to 5420, apart from one short step at 4860. Both humans were idle for most of it, and it started again right after player 1 moved (5380). Copies of the recording with one stick pushed for ticks 4950–5010 (`runs\c410d`): player 1 walking got the rival moving within 30 ticks, and it followed player 1's x; player 2 walking the same way changed nothing; the unchanged copy stayed still.
+- **Cause.** The rival never chases player 2. `func_8025DC60` spawns a story rival with its AI record's target set to slot 0 (`0x8025DF04`), and `func_802553D4` re-picks only when the target's hearts reach 0 or the target is -1, behind `g_LevelLoader` bit `0x4`. Co-op respawns restore hearts before they reach 0, so the rival followed player 1 for the whole fight and waited whenever player 1 was idle. The Battle picker `func_80251708` would not help either: it draws a slot from 0–3 only, and rival-map teammates sit in slots 4–7. Details under "Computer-bomber AI" in `game-internals.md`.
+- **Pauses are partly the game's own.** In a single-player replay of the same seed and player-1 inputs (`runs\c410d\sp`, co-op off, player 2's port zeroed), the rival also stands still 100–380 ticks at a time (ten stretches before the fight ended). The 760-tick pause in co-op came from the rival waiting on an idle player 1 while ignoring player 2.
+- **Fix.** `retarget_rivals` runs every 120 ticks on story maps (outside cutscenes): each rival whose target is a human turns to the nearest living human, if that one is less than 0.75 times as far as the current target, by writing the record's `+0x10` (slot) and `+0x1C` (object). The `func_80251708` slot range is unchanged; nothing in story was seen to call it.
+- **Trace.** `BM64_COOP_TRACE` lines now end a computer bomber's entry with `t<slot>`, its AI target.
+- **Checks.**
+  - `coop_410d.bm64rec` on the new build: the rival switched between player 1 and 2 three times and was after player 2 on 61 of 144 samples. It turned to player 2 at tick 3240 and then closed in: 614 units away at 3340, 92 at 3440. Copies with seeds `0x11111111`, `0x22222222` and `0x33333333` switched 2, 2 and 5 times. Before the fix it was after player 1 on every sample, with every seed tried.
+  - SyncTest at depths 1 and 12: `coop_410b` (4,453 ticks), `coop_410c` (7,962) and `coop_410d` (7,573) pass, with 8 and 6 retargets logged in the last two (`runs\st\rivaltgt`).
+  - Co-op director SyncTests, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=buttons`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\rivaltgt\scenes`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each. The 4.10 scene logged no retarget (player 2 was never clearly nearer).
+  - Single-player `test.bm64rec` against the previous build (`runs\colfix_solo`): identical on all 9,591 ticks.
+- Not watched in a window. Next user check: on 4.10 with two players, keep player 1 still and walk player 2 up to the rival; it should turn to player 2 within about two seconds.
+- `run-synctest-scenes.ps1` and `run-synctest-coverage.ps1` take `-Exe`, so a copy of the exe can be tested while the user's game holds `build\BM64Recompiled.exe` open.
 
 ## Risks and fallbacks
 

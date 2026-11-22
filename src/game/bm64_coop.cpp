@@ -463,6 +463,66 @@ void separate_humans(uint8_t* rdram) {
     }
 }
 
+// A rival's AI record (func_80251804's layout at D_800BCFE8, stride 0x128) holds its target slot at
+// +0x10 and that slot's object at +0x1C. func_8025DC60 spawns rivals aimed at slot 0, and in story
+// the AI never picks again, so a teammate was never chased. Every two seconds each rival turns to
+// the nearest living human, if that one is clearly closer than its current target.
+void retarget_rivals(uint8_t* rdram) {
+    constexpr uint32_t kAiRecords = 0x800BCFE8u;
+    constexpr uint32_t kAiStride = 0x128u;
+    constexpr uint32_t kEvery = 120;
+    if (bm64::debug::tick() % kEvery != 0 || cutscene_running(rdram)) {
+        return;
+    }
+    for (int r = 0; r < bm64::coop::kPlayerSlots; r++) {
+        uint32_t rbase = bm64::coop::kPlayerBase + static_cast<uint32_t>(r) * bm64::coop::kPlayerStride;
+        uint32_t rec = kAiRecords + static_cast<uint32_t>(r) * kAiStride;
+        uint32_t rbody = 0;
+        if (word(rdram, rbase + 0x24) != 2 || word(rdram, rec + 0x0C) != r || !slot_body(rdram, r, rbody)) {
+            continue;
+        }
+        int current = word(rdram, rec + 0x10);
+        if (current < 0 || current >= bm64::coop::kPlayerSlots ||
+            word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(current) * bm64::coop::kPlayerStride + 0x24) != 1) {
+            continue;
+        }
+        float rx = f32_at(rdram, rbody + 0x10);
+        float rz = f32_at(rdram, rbody + 0x18);
+        int best = -1;
+        float best_d2 = 0;
+        float current_d2 = -1;
+        for (int h = 0; h < bm64::coop::kPlayerSlots; h++) {
+            uint32_t hbase = bm64::coop::kPlayerBase + static_cast<uint32_t>(h) * bm64::coop::kPlayerStride;
+            uint32_t hbody = 0;
+            if (word(rdram, hbase + 0x24) != 1 || word(rdram, hbase + 0x14) <= 0 || !slot_body(rdram, h, hbody)) {
+                continue;
+            }
+            float dx = f32_at(rdram, hbody + 0x10) - rx;
+            float dz = f32_at(rdram, hbody + 0x18) - rz;
+            float d2 = dx * dx + dz * dz;
+            if (h == current) {
+                current_d2 = d2;
+            }
+            if (best < 0 || d2 < best_d2) {
+                best = h;
+                best_d2 = d2;
+            }
+        }
+        // 0.5625 is 0.75 squared: the new target must be at least a quarter nearer.
+        if (best < 0 || best == current || (current_d2 >= 0 && best_d2 >= 0.5625f * current_d2)) {
+            continue;
+        }
+        set_word(rdram, rec + 0x10, best);
+        set_word(rdram, rec + 0x1C,
+            word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(best) * bm64::coop::kPlayerStride + 0x28));
+        static int logged = 0;
+        if (logged < 8) {
+            logged++;
+            std::printf("[bm64 coop] Rival slot %d now after slot %d\n", r, best);
+        }
+    }
+}
+
 void note_checkpoint_hearts(uint8_t* rdram) {
     uint8_t* rec = rule(rdram);
     if (rec[0x28] == 0 || rec[0x29] != 0) {
@@ -552,6 +612,7 @@ void apply_rules(uint8_t* rdram) {
         note_checkpoint_hearts(rdram);
         apply_cutscene_hide(rdram);
         separate_humans(rdram);
+        retarget_rivals(rdram);
     }
     static const int trace_every = [] {
         const char* v = std::getenv("BM64_COOP_TRACE");
@@ -573,6 +634,10 @@ void apply_rules(uint8_t* rdram) {
                 word(rdram, base + 0x14), word(rdram, base + 0x10), word(rdram, base + 0x44),
                 word(rdram, base + 0x48), word(rdram, base + 0x68), word(rdram, base + 0x2C),
                 word(rdram, base + 0x30), x, y, z);
+            if (control == 2) {
+                // func_80251804's AI record for the slot; +0x10 is the slot it is after.
+                std::printf(" t%d", word(rdram, 0x800BCFE8u + static_cast<uint32_t>(i) * 0x128u + 0x10u));
+            }
         }
         std::printf("\n");
     }
