@@ -377,13 +377,18 @@ void settle_parked_checkpoint(uint8_t* rdram) {
     }
 }
 
+uint32_t g_cutscene_func = 0;
+
 bool cutscene_running(uint8_t* rdram) {
     uint32_t head = 0x802AB200u;
     uint32_t proc = static_cast<uint32_t>(word(rdram, head + 0x89C));
     for (int n = 0; n < 80 && proc != 0 && proc != head; n++) {
         int mode = word(rdram, proc + 0x04);
         uint32_t func = static_cast<uint32_t>(word(rdram, proc + 0x0C));
-        if (mode != 0 && category_of(sess().overlay, func) == bm64::coop::kCatCutscene) {
+        // func_802553D4 is the scripted-bomber update. It drives a rival for its whole fight, so
+        // counting it hid (no collision) every teammate for the fight on rival maps.
+        if (mode != 0 && func != 0x802553D4u && category_of(sess().overlay, func) == bm64::coop::kCatCutscene) {
+            g_cutscene_func = func;
             return true;
         }
         proc = static_cast<uint32_t>(word(rdram, proc + 0x89C));
@@ -547,6 +552,29 @@ void apply_rules(uint8_t* rdram) {
         note_checkpoint_hearts(rdram);
         apply_cutscene_hide(rdram);
         separate_humans(rdram);
+    }
+    static const int trace_every = [] {
+        const char* v = std::getenv("BM64_COOP_TRACE");
+        return v ? std::atoi(v) : 0;
+    }();
+    if (trace_every > 0 && story_map(sess().overlay) && bm64::debug::tick() % static_cast<uint32_t>(trace_every) == 0) {
+        bool cut = cutscene_running(rdram);
+        std::printf("[bm64 trace] tick %u leader %d cut %08X", bm64::debug::tick(), word(rdram, 0x802AC894u),
+            cut ? g_cutscene_func : 0u);
+        for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+            uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+            int control = word(rdram, base + 0x24);
+            if (control == 0) {
+                continue;
+            }
+            float x = 0, y = 0, z = 0;
+            obj_pos(rdram, static_cast<uint32_t>(word(rdram, base + 0x28)), x, y, z);
+            std::printf(" | s%d c%d h%d f%08X a%X col%X 68:%08X 2C:%08X 30:%08X (%.0f,%.0f,%.0f)", i, control,
+                word(rdram, base + 0x14), word(rdram, base + 0x10), word(rdram, base + 0x44),
+                word(rdram, base + 0x48), word(rdram, base + 0x68), word(rdram, base + 0x2C),
+                word(rdram, base + 0x30), x, y, z);
+        }
+        std::printf("\n");
     }
     if (const char* probe = std::getenv("BM64_SLOT_PROBE")) {
         if (probe[0] != '\0' && probe[0] != '0' && !s.probed && bm64::debug::tick() == 200) {

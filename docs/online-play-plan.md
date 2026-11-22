@@ -1071,6 +1071,21 @@ Unattended runs. Not watched on a screen; the evidence is which parts files load
 
 - 3001 ticks each. 9.6 was not reached: director warps to `0x7D`, `0x7F` and `0x80` stop loading right after the warp (overlay 9, no stage), and `0x7F` does the same with co-op off, so it is the warp or the scene id, not co-op. For 9.6 the evidence is the code above only. Without it each recording picks its own, so the same scene can pass in one run and fail in the next.
 
+### Teammate without collision on rival maps (2026-11-22)
+
+User report (check 1, `coop_410c.bm64rec`): on 4.10 player 2 stopped animating and slid along the ground, the rival stood still, and touching the rival pushed player 2 off the left edge of the stage over the water. Investigated by replay only.
+
+- **Cause.** `apply_cutscene_hide` switches teammates' collision (`+0x48`) off while a cutscene process runs. `cutscene_running` counted any live process whose entry is classified cutscene, and `func_802553D4` is in that class because it calls `setMainPlayer`. It is the scripted-bomber update (`0x71BC` bytes) that drives the rival for its whole fight. So from the rival's spawn (tick ~2900 in the recording) to the end, player 2 (slot 4) had no collision: 510 of 568 trace samples after the spawn had `+0x48 = 0`, and player 2 sat in flag `0x2` for 181 samples while sliding with nothing to stop it (x from 2044 to -1604 at a constant 6 units a tick, z fixed).
+- **Fix.** `cutscene_running` skips `func_802553D4`. Real cutscenes on rival maps still count: in the single-player replay of the same inputs, the death sequence `func_8023F26C` is detected.
+- **Rival standing still** is the game's own behaviour: in a single-player replay of the user's player-1 inputs (player 2's port zeroed, `runs\c410\sp.txt`), the rival also stands still for long stretches while the player is idle (ticks 4000–4400 and 7000–7400).
+- **Trace.** `BM64_COOP_TRACE=N` prints every N ticks, on story maps, each active slot's control type, hearts, flags, animation, `+0x48`, `+0x68`, held objects and body position, plus the leader and the process counted as a cutscene (if any).
+- **Checks.**
+  - `coop_410c.bm64rec` on the new build (`runs\c410\fix1.txt`): player 2 keeps collision on every sample (0 of 568 off), flag `0x2` shows on 4 samples only, and player 2 stays inside the stage (x ≤ 3000, z ≥ 900). The recording's later inputs were made for the old behaviour, so the replay after the rival's spawn is not what the user saw.
+  - Single-player `test.bm64rec` against the previous build (`runs\demo\solo_new`, `runs\colfix_solo`): identical on all 9,591 ticks.
+  - Co-op director SyncTests with the fixed colors, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=buttons`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\colfix`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each.
+  - `coop_410b.bm64rec` (4,453 ticks) and `coop_410c.bm64rec` (7,962 ticks): SyncTest passes at depths 1 and 12 (`runs\st\colfix_coop_410*`).
+- One replay during this work (`runs\c410\out2.txt`) stopped with a fail-fast exception (`0xC0000409`, attributed to `bm64_state.cpp` around the snapshot segment list) at the 4.10 load; the identical rerun passed. Not reproduced since; recorded here in case it returns.
+
 ## Risks and fallbacks
 
 - **Coroutine snapshots (3.2–3.3)** are the biggest technical risk. Fallback: delay-based lockstep needs no snapshots; Battle still ships, with more input delay.
