@@ -17,7 +17,8 @@ param(
     [string]$Seed = "",
     [string]$Menu = "",
     [int]$BootTicks = 600,
-    [switch]$SkipRecord
+    [switch]$SkipRecord,
+    [string]$Exe = "build\BM64Recompiled.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +28,7 @@ try {
     New-Item -ItemType Directory -Force $Out | Out-Null
     $rec = Join-Path $Out "rec.bm64rec"
     if (-not $SkipRecord) {
-        $director = @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-director.ps1"), "-Scenes", $Scenes, "-Secs", "$Secs", "-BootTicks", "$BootTicks", "-Out", $Out)
+        $director = @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "run-director.ps1"), "-Scenes", $Scenes, "-Secs", "$Secs", "-BootTicks", "$BootTicks", "-Out", $Out, "-Exe", $Exe)
         if ($Seed -ne "") {
             $director += @("-Seed", $Seed)
         }
@@ -58,7 +59,7 @@ try {
         $env:BM64_SYNCTEST = "$d"
         $env:BM64_SYNCTEST_DUMP = Join-Path (Resolve-Path $Out).Path "st$d\dumps"
         try {
-            & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run-replay.ps1") -Replay $rec -Out $stOut -TimeoutSec 7200 | Out-Null
+            & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run-replay.ps1") -Replay $rec -Out $stOut -TimeoutSec 7200 -Exe $Exe | Out-Null
         }
         finally {
             Remove-Item Env:BM64_SYNCTEST, Env:BM64_SYNCTEST_DUMP -ErrorAction SilentlyContinue

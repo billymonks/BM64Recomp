@@ -16,7 +16,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Scenes,
     [Parameter(Mandatory = $true)][string]$Out,
     [int]$Secs = 30,
-    [switch]$ArenaMenus
+    [switch]$ArenaMenus,
+    [string]$Exe = "build\BM64Recompiled.exe"
 )
 
 # Start on the title, Start again for the main menu, stick down to Battle, Start. The director's A
@@ -28,7 +29,7 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 foreach ($scene in ($Scenes -split ",")) {
     $dir = Join-Path $Out $scene
     try {
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run-synctest-coverage.ps1") -Scenes $scene -Secs $Secs -Out $dir @menuArgs | Out-Null
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run-synctest-coverage.ps1") -Scenes $scene -Secs $Secs -Out $dir -Exe $Exe @menuArgs | Out-Null
     }
     catch {
         Write-Warning "Scene ${scene}: $_"
