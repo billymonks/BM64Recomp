@@ -708,12 +708,15 @@ void unbind_camera_player(uint8_t* rdram) {
 }
 
 // Human bombers only. AI keeps the shared camera, which is the block left live between updates.
+// The controller dereferences the bomber's body, which stage teardown (such as leaving the
+// attract demo) clears before the camera process stops.
 int rebuild_subjects(uint8_t* rdram) {
     int count = 0;
     uint8_t* subjects = ram(rdram, bm64::coop::kCamMeta) + 8;
     for (int i = 0; i < bm64::coop::kPlayerSlots && count < 8; i++) {
         int control = word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride + 0x24);
-        if (control == 1) {
+        uint32_t body;
+        if (control == 1 && slot_body(rdram, i, body)) {
             subjects[count++] = static_cast<uint8_t>(i);
         }
     }
@@ -792,6 +795,10 @@ extern "C" int bm64_camera_next(uint8_t* rdram) {
     int slot = ram(rdram, bm64::coop::kCamMeta)[8 + index];
     copy_block(rdram, slot, false);
     index++;
+    uint32_t body;
+    while (index < count && !slot_body(rdram, ram(rdram, bm64::coop::kCamMeta)[8 + index], body)) {
+        index++;
+    }
     if (index < count) {
         set_meta(rdram, 1, static_cast<uint8_t>(index));
         int next = ram(rdram, bm64::coop::kCamMeta)[8 + index];
