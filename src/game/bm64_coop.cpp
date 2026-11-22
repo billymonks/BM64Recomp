@@ -649,6 +649,31 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
     }
 }
 
+// g_SpawnPlayer loads the bomber's 12 parts from file 0x4A + slot (white, black, red, blue) for
+// slots 0-3; slots 4-7 keep the file of the previous spawn, so rival-map teammates came out white.
+// a1 holds the parts file for g_AssignModelParts. Rival maps spawn the rival with black (0x4B).
+extern "C" void bm64_coop_spawn_color(uint8_t* rdram, recomp_context* ctx) {
+    if (!story()) {
+        return;
+    }
+    int slot = static_cast<int>(ctx->r19);
+    if (slot <= 0 || slot >= bm64::coop::kPlayerSlots) {
+        return;
+    }
+    uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride;
+    if (word(rdram, base + 0x24) != 1) {
+        return;
+    }
+    int rank = party_rank(rdram, slot);
+    if (rank <= 0) {
+        return;
+    }
+    static constexpr int32_t normal[3] = { 0x4B, 0x4C, 0x4D };
+    static constexpr int32_t rival[3] = { 0x4C, 0x4D, 0x4B };
+    const int32_t* colors = rival_map(sess().overlay) ? rival : normal;
+    ctx->r5 = colors[(rank - 1) % 3];
+}
+
 extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
     Session& s = sess();
     if (!story()) {

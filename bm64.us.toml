@@ -347542,3 +347542,14 @@ text = """
     bm64_main_site(0x80046358u);
 """
 # END bm64 main-player call sites
+
+# BEGIN bm64 coop colors
+# g_SpawnPlayer passes the parts file to g_AssignModelParts in a1; slots 4-7 have no case of their own.
+[[patches.hook]]
+func = "g_SpawnPlayer"
+before_vram = 0x80245BC4
+text = """
+    extern void bm64_coop_spawn_color(uint8_t* rdram, recomp_context* ctx);
+    bm64_coop_spawn_color(rdram, ctx);
+"""
+# END bm64 coop colors

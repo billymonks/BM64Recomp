@@ -1010,6 +1010,20 @@ Unattended runs. No one watched a window.
   - Single-player `test.bm64rec`, old build (`039343a`) against new, both hashing the same ranges (`runs\hwm_solo_base`, `runs\hwm_solo_new`): `ovl`, `files`, `data`, `gfx`, `prc`, `heap` and `game` match on all 9,591 ticks (`game` skips the `free_hook` word `0x802B36AC`). `bss` differs on 96 ticks. At tick 2579 that is 7 words in suspended processes' stacks: return addresses into patch code, which shifted by `0xC0`, and break values the new sbrk spilled. These are the same kind of cross-build stack leftovers as in "Overnight runs". Two runs of the new build are identical.
 - Director warps into story stages no longer need the menus for heap.
 
+### Teammate colors (2026-11-22)
+
+Unattended runs. Not watched on a screen; the evidence is which parts files load.
+
+- **Cause.** `g_SpawnPlayer` loads a bomber's 12 parts from file `0x4A` + slot for slots 0–3 (white, black, red, blue, as in Battle). Slots 4–7 have no case, so they reuse the file of the previous spawn through a stack slot. On rival maps teammates live in slots 4–7, so they came out white like the leader. On other maps the teammate is slot 1 and was already black.
+- **Fix.** A toml hook in `g_SpawnPlayer` at `0x80245BC4` (block `bm64 coop colors`) calls `bm64_coop_spawn_color`, which replaces the parts file in `a1` for a human teammate in a story session. Party rank 1, 2 and 3 get black, red and blue (`0x4B`, `0x4C`, `0x4D`). On rival maps the order is red, blue, black, because the rival is spawned black (`func_8025DC60` assigns `0x4B`). Rank 4 and up wrap around. The leader, rivals, AI, Battle and runs without a session are untouched.
+- **Heap.** Files load once per stage and are shared by reference count. Each color file is `0x4EEA` bytes (about 20 KB); the body `0x49` is `0x10E58`. The load log now prints the size.
+- **Parts 4 and 5.** With flag `0x200` in `+0x68`, `g_SpawnPlayer` only re-tags parts 4 and 5 before the 12-part loop, and the loop then reloads all 12 from the chosen file. No caller passes `0x4A` to `g_AssignModelParts` later, so nothing turns a teammate white again.
+- **Checks.**
+  - Co-op director SyncTests (`runs\st\colors`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 2401 ticks each. Scene `0x31` loads `0x4A`, `0x4C` (the teammate) and later `0x4B` (the rival). The other four load `0x4A` and `0x4B`.
+  - `coop_410b.bm64rec`: SyncTest passes at depths 1 and 12 (4,453 ticks). It loads `0x4C` for player 2.
+  - Single-player `test.bm64rec` against the heap build (`runs\hwm_dn`, `runs\hwm_solo_new`): `ovl`, `files`, `data`, `gfx`, `prc`, `heap` and `slots` match on all 9,591 ticks. `game` matches once the `free_hook` word `0x802B36AC` is skipped (`runs\colors\solo_nofh`); that pointer moved because the patch code changed. `bss` differs on 398 ticks, which is the documented kind of cross-build stack leftover. It was not re-proven word by word for this build.
+- Open: which colors the rivals on 5.7, 6.15, 8.13 (three rivals), 9.5 and 9.6 use. A teammate can match a rival there.
+
 ## Risks and fallbacks
 
 - **Coroutine snapshots (3.2–3.3)** are the biggest technical risk. Fallback: delay-based lockstep needs no snapshots; Battle still ships, with more input delay.

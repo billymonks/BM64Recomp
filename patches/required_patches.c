@@ -1501,12 +1501,12 @@ RECOMP_PATCH void *func_8026CE28(s32 fileID) {
     }
     id = func_8026CD24(fileID);
     if (fileID != D_800A7F30[id].fileID) {
-        recomp_printf("[func_8026CE28] Loading FileID: (0x%08X) %d\n", fileID, fileID);
         D_802AFC30 += 1;
         D_800A7F30[id].fileID = fileID;
         func_802267E0(0x18);
         sp24 = func_80226604(fileID, 1);
         func_8022616C(&size, 4, 1, sp24);
+        recomp_printf("[func_8026CE28] Loading FileID: (0x%08X) %d size 0x%X\n", fileID, fileID, size);
         D_800A7F30[id].unk4 = func_802998EC(size); // malloc
         if (D_800A7F30[id].unk4 == NULL) {
             // The decompressor below then writes through a null pointer and the game faults.
