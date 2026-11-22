@@ -1024,6 +1024,13 @@ Unattended runs. Not watched on a screen; the evidence is which parts files load
   - Single-player `test.bm64rec` against the heap build (`runs\hwm_dn`, `runs\hwm_solo_new`): `ovl`, `files`, `data`, `gfx`, `prc`, `heap` and `slots` match on all 9,591 ticks. `game` matches once the `free_hook` word `0x802B36AC` is skipped (`runs\colors\solo_nofh`); that pointer moved because the patch code changed. `bss` differs on 398 ticks, which is the documented kind of cross-build stack leftover. It was not re-proven word by word for this build.
 - Open: which colors the rivals on 5.7, 6.15, 8.13 (three rivals), 9.5 and 9.6 use. A teammate can match a rival there.
 
+### Scripted teammates in director runs (2026-11-22)
+
+Unattended runs. Not watched on a screen.
+
+- Director runs used to drive player 1 only and zero ports 1–3, so two bombers moving at once in a story stage were covered only by the user's recordings. `BM64_DIRECTOR_COOP=move` gives each co-op port 1–3 its own random stick (held 4–20 ticks, seeded from the director seed and the port); `buttons` adds A (1 in 4) and B (1 in 8). Start is never pressed. Menus (banks 1–3) and scripted menu presses keep the teammates idle. The pads go into the recording like player 1's, so replays and SyncTests read them from the file. Without the variable nothing changes.
+- Co-op SyncTests with `BM64_COOP_LOCAL=2` and `BM64_DIRECTOR_COOP=buttons`, `-Secs 40` (`runs\st\coopmove1`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each. Player 2's pad is non-zero on 2,367 ticks in `0x28`, `0x31` and `0x48`, with deaths, respawns and the separation push in the logs. In `0x38` and `0x58` the party ran out of lives: game over, back to the title (overlay 11), and the attract demo (overlays 28, 43, 50, 19), so player 2 was only active for about 630 ticks there.
+
 ## Risks and fallbacks
 
 - **Coroutine snapshots (3.2–3.3)** are the biggest technical risk. Fallback: delay-based lockstep needs no snapshots; Battle still ships, with more input delay.

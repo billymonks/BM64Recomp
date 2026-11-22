@@ -132,6 +132,17 @@ namespace {
             int8_t stick_y;
         };
         std::vector<MenuPress> menu;
+        // BM64_DIRECTOR_COOP: co-op ports 1-3 get their own random pads in stages ("move" for the
+        // stick only, "buttons" to add A and B). Off leaves them idle.
+        int coop_mode = 0;
+        struct Teammate {
+            uint32_t rng;
+            uint32_t hold;
+            uint16_t button;
+            int8_t stick_x;
+            int8_t stick_y;
+        };
+        Teammate teammates[4] = {};
     } director;
     constexpr uint64_t menu_press_ticks = 3;
     constexpr int32_t battle_setup_overlay = 13;
@@ -296,6 +307,20 @@ namespace {
                 director.rng = parsed;
             }
         }
+        if (const char* coop = env("BM64_DIRECTOR_COOP")) {
+            if (std::strcmp(coop, "move") == 0) {
+                director.coop_mode = 1;
+            }
+            else if (std::strcmp(coop, "buttons") == 0) {
+                director.coop_mode = 2;
+            }
+            else {
+                fprintf(stderr, "[bm64 director] Ignoring BM64_DIRECTOR_COOP=%s (expected move or buttons)\n", coop);
+            }
+            for (uint32_t port = 1; port < 4; port++) {
+                director.teammates[port].rng = director.rng ^ (0x85EBCA6Bu * (port + 1));
+            }
+        }
         if (const char* menu = env("BM64_DIRECTOR_MENU")) {
             for (const std::string& item : split(menu, ',')) {
                 std::vector<std::string> parts = split(item, ':');
@@ -361,10 +386,42 @@ namespace {
         MEM_B(2, pads) = stick_x;
         MEM_B(3, pads) = stick_y;
         MEM_B(4, pads) = 0;
+        int coop = bm64::coop::session_players();
         for (uint32_t port = 1; port < num_ports; port++) {
-            MEM_H(port * pad_size + 0, pads) = 0;
-            MEM_B(port * pad_size + 2, pads) = 0;
-            MEM_B(port * pad_size + 3, pads) = 0;
+            uint16_t mate_button = 0;
+            int8_t mate_x = 0;
+            int8_t mate_y = 0;
+            if (director.coop_mode != 0 && !menu && !scripted && static_cast<int>(port) < coop) {
+                Director::Teammate& mate = director.teammates[port];
+                auto next = [&mate]() {
+                    uint32_t x = mate.rng;
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    mate.rng = x;
+                    return x;
+                };
+                if (mate.hold == 0) {
+                    mate.hold = 4 + next() % 17;
+                    mate.stick_x = static_cast<int8_t>(static_cast<int>(next() % 161) - 80);
+                    mate.stick_y = static_cast<int8_t>(static_cast<int>(next() % 161) - 80);
+                    mate.button = 0;
+                    // Never Start (0x1000): it would pause.
+                    if (director.coop_mode == 2 && next() % 4 == 0) {
+                        mate.button |= 0x8000;
+                    }
+                    if (director.coop_mode == 2 && next() % 8 == 0) {
+                        mate.button |= 0x4000;
+                    }
+                }
+                mate.hold--;
+                mate_button = mate.button;
+                mate_x = mate.stick_x;
+                mate_y = mate.stick_y;
+            }
+            MEM_H(port * pad_size + 0, pads) = static_cast<int16_t>(mate_button);
+            MEM_B(port * pad_size + 2, pads) = mate_x;
+            MEM_B(port * pad_size + 3, pads) = mate_y;
         }
 
         if (state.tick < director.boot_ticks) {
