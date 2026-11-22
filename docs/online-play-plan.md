@@ -1022,7 +1022,7 @@ Unattended runs. Not watched on a screen; the evidence is which parts files load
   - Co-op director SyncTests (`runs\st\colors`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 2401 ticks each. Scene `0x31` loads `0x4A`, `0x4C` (the teammate) and later `0x4B` (the rival). The other four load `0x4A` and `0x4B`.
   - `coop_410b.bm64rec`: SyncTest passes at depths 1 and 12 (4,453 ticks). It loads `0x4C` for player 2.
   - Single-player `test.bm64rec` against the heap build (`runs\hwm_dn`, `runs\hwm_solo_new`): `ovl`, `files`, `data`, `gfx`, `prc`, `heap` and `slots` match on all 9,591 ticks. `game` matches once the `free_hook` word `0x802B36AC` is skipped (`runs\colors\solo_nofh`); that pointer moved because the patch code changed. `bss` differs on 398 ticks, which is the documented kind of cross-build stack leftover. It was not re-proven word by word for this build.
-- Open: which colors the rivals on 5.7, 6.15, 8.13 (three rivals), 9.5 and 9.6 use. A teammate can match a rival there.
+- Rival colors on the other rival maps: see "Rival colors on every rival map" below.
 
 ### Scripted teammates in director runs (2026-11-22)
 
@@ -1049,7 +1049,25 @@ Unattended runs. Not watched on a screen.
   - Co-op SyncTests, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=buttons`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\coopfix`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each, with 5, 3, 3, 13 and 4 respawns. Before the fix this seed froze `0x48` at tick 1260.
   - Scene `0x48` with the other two seeds that froze (`runs\st\coopfix_8D708355`, `runs\st\coopfix_A7445B34`): both pass at depths 1 and 12, 3001 ticks, 15 respawns each.
   - Single-player `test.bm64rec` against the previous build (`runs\colors\solo`, `runs\demo\solo_new`): identical on all 9,591 ticks.
-- `BM64_SEED` pins the game's RNG seed for a director recording. Without it each recording picks its own, so the same scene can pass in one run and fail in the next.
+- `BM64_SEED` pins the game's RNG seed for a director recording.
+
+### Rival colors on every rival map (2026-11-22)
+
+Unattended runs. Not watched on a screen; the evidence is which parts files load, and the game code.
+
+- **Every rival is black.** `func_8025DC60` (main code) spawns a rival bomber into the slot it is given and loads parts file `0x4B` (black) for all 12 parts, whatever the slot. Exactly six overlays call it, through their secure-call stubs: 4.10 (2 calls), 5.7 (2), 6.15 (2), 8.13 (7), 9.5 (6) and 9.6 (2). No other bomber parts file is assigned in those overlays: their only direct `g_AssignModelParts` calls (6.15 and 9.5) load files `0x11B` and `0x1D0`, which are other models. So the three rivals on 8.13 are all black too.
+- **No change needed.** The rival-map teammate order (red, blue, black) already keeps the first two teammates off black on all six maps. With four players, the third teammate (rank 3) is black like the rivals. There are only four bomber parts files (`0x4A`–`0x4D`), so that clash stays. The code comment now says this applies to every rival map.
+- **Checks.** Co-op director SyncTests, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=buttons`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\rivals`, `runs\st\rivals9`):
+
+| Scene | Map (overlay) | Parts files loaded after the warp | Depth 1 | Depth 12 |
+|---|---|---|---|---|
+| `0x3E` | 5.7 (34) | `0x49`, `0x4A`, `0x4C` (teammate), `0x4B` (rival) | PASS | PASS |
+| `0x56` | 6.15 (49) | `0x49`, `0x4A`, `0x4C`, `0x4B` | PASS | PASS |
+| `0x74` | 8.13 (72) | `0x49`, `0x4A`, `0x4C`, `0x4B` | PASS | PASS |
+| `0x7C` | 9.4 (76), not a rival map | `0x49`, `0x4A`, `0x4B` (teammate, normal order) | PASS | PASS |
+| `0x7E` | 9.5 (77) | `0x49`, `0x4A`, `0x4C`, `0x4B` | PASS | PASS |
+
+- 3001 ticks each. 9.6 was not reached: director warps to `0x7D`, `0x7F` and `0x80` stop loading right after the warp (overlay 9, no stage), and `0x7F` does the same with co-op off, so it is the warp or the scene id, not co-op. For 9.6 the evidence is the code above only. Without it each recording picks its own, so the same scene can pass in one run and fail in the next.
 
 ## Risks and fallbacks
 

@@ -706,7 +706,8 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
 
 // g_SpawnPlayer loads the bomber's 12 parts from file 0x4A + slot (white, black, red, blue) for
 // slots 0-3; slots 4-7 keep the file of the previous spawn, so rival-map teammates came out white.
-// a1 holds the parts file for g_AssignModelParts. Rival maps spawn the rival with black (0x4B).
+// a1 holds the parts file for g_AssignModelParts. Every rival on all six rival maps comes from
+// func_8025DC60, which always loads black (0x4B), so black goes last there.
 extern "C" void bm64_coop_spawn_color(uint8_t* rdram, recomp_context* ctx) {
     if (!story(rdram)) {
         return;
