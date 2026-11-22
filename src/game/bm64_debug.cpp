@@ -1180,9 +1180,7 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
             write_pod(state.record_file, err);
             write_pod(state.record_file, i == 0 ? command : uint8_t{ 0 });
         }
-        if ((state.input_frame % 60) == 0) {
-            state.record_file.flush();
-        }
+        state.record_file.flush();
     }
     else if (state.input_mode == InputMode::Replay) {
         if (state.replay_cursor + num_ports * pad_size > state.replay_frames.size()) {
