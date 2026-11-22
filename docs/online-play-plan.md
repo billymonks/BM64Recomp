@@ -1031,6 +1031,26 @@ Unattended runs. Not watched on a screen.
 - Director runs used to drive player 1 only and zero ports 1–3, so two bombers moving at once in a story stage were covered only by the user's recordings. `BM64_DIRECTOR_COOP=move` gives each co-op port 1–3 its own random stick (held 4–20 ticks, seeded from the director seed and the port); `buttons` adds A (1 in 4) and B (1 in 8). Start is never pressed. Menus (banks 1–3) and scripted menu presses keep the teammates idle. The pads go into the recording like player 1's, so replays and SyncTests read them from the file. Without the variable nothing changes.
 - Co-op SyncTests with `BM64_COOP_LOCAL=2` and `BM64_DIRECTOR_COOP=buttons`, `-Secs 40` (`runs\st\coopmove1`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each. Player 2's pad is non-zero on 2,367 ticks in `0x28`, `0x31` and `0x48`, with deaths, respawns and the separation push in the logs. In `0x38` and `0x58` the party ran out of lives: game over, back to the title (overlay 11), and the attract demo (overlays 28, 43, 50, 19), so player 2 was only active for about 630 ticks there.
 
+### Attract demo, parked checkpoints and pit respawns (2026-11-22)
+
+Unattended runs. Not watched on a screen.
+
+- **Attract demo.** Left on the title, the game plays its demo stages from recorded input, and co-op used to take them over (spawning teammates, respawns, port map). `func_80297ADC` starts the attract sequence: it calls `setMainPlayer(0)`, starts the demo playback process `0x80297A34`, allocates four demo input buffers at `0x802B03C0`, and sets bit 2 (`0x4`) of the game flags `D_802AC610` (getter `func_8023A840`; the HUD skips drawing while `flags & 6`). Pressing Start returns to the title, which clears the flags. Arena setup in `func_8023D0F8` sets the same bit for scenes `0x90`–`0x99`, which are not story maps anyway. Memory dumps: the flags are 13 during the intro movie and demo stages, 1 on the title and 0 in menus and stages entered through them. `story()` now also requires bit 2 clear, so every co-op rule stays off during the demo.
+  - `coop_410b.bm64rec` (the user's 4.10 run through the menus): old and new builds hash identically on all 4,453 ticks.
+  - `coop_410_b` (left idle on the title): co-op no longer starts in the demo; the logs differ only from the first demo stage (tick 732).
+- **Director warps.** Director warps leave from the title or the intro, where bits 0, 2 and 3 are still set, so after the gate a warped stage counted as a demo and co-op stayed off. `request_scene` now clears those bits (`& ~0xD`) along with the scene request. Single-player director stages therefore differ from earlier builds' director runs from the warp on (HUD drawn, flags 0, as through the menus).
+- **Parked checkpoint.** On a warp into 5.1 (`0x38`), slot 0's spawn stays parked at -10000 while the overlay places the leader's body from the stage entry, so the checkpoint and teammates were copied from the void: 4,259 respawns in one run. `settle_parked_checkpoint` (first in `apply_rules`) moves a parked checkpoint to the leader's body once it is on the map, and parked teammates beside it. `0x38` then passed with 3 respawns.
+- **Pit respawn loop (the 4.10 freeze).** On 6.1 (`0x48`), 3 of 4 random seeds froze at tick 1260 after 33 kind-3 kills of player 2 in a row, the same count as the user's 4.10 lockup. Hardware write watches on player 2's collision record and body found the chain:
+  - Bit 30 of the record's `+0x10` is latched by `func_80232FA8` from the accumulator `+0x14`, which `func_80232FF8` sets when the body's y is at or below the stage's kill plane (`func_8026E8B8` returns the float at `0x802AFC5C`, -600 on 6.1). So kind 3 is a fall into a pit.
+  - Respawning moved the body to the checkpoint (y 1600), but the collision record kept its previous position (`+0x58/+0x5C/+0x60`) at the bottom of the pit. `func_802909FC` (floor and wall collision) sweeps from there and put the body back at y -600 on the next tick, so it died again on every tick until the game hung.
+  - `place_human` now also sets the record's previous position. The frozen recording replays to the end with 4 respawns, and y stays 1600.
+  - Two earlier guesses were wrong and are not in the code: spacing the respawn away from other bombers, and waiting for the leader to land.
+- **Checks.**
+  - Co-op SyncTests, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=buttons`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\coopfix`): scenes `0x28`, `0x31` (4.10), `0x38`, `0x48` and `0x58` pass at depths 1 and 12, 3001 ticks each, with 5, 3, 3, 13 and 4 respawns. Before the fix this seed froze `0x48` at tick 1260.
+  - Scene `0x48` with the other two seeds that froze (`runs\st\coopfix_8D708355`, `runs\st\coopfix_A7445B34`): both pass at depths 1 and 12, 3001 ticks, 15 respawns each.
+  - Single-player `test.bm64rec` against the previous build (`runs\colors\solo`, `runs\demo\solo_new`): identical on all 9,591 ticks.
+- `BM64_SEED` pins the game's RNG seed for a director recording. Without it each recording picks its own, so the same scene can pass in one run and fail in the next.
+
 ## Risks and fallbacks
 
 - **Coroutine snapshots (3.2–3.3)** are the biggest technical risk. Fallback: delay-based lockstep needs no snapshots; Battle still ships, with more input delay.

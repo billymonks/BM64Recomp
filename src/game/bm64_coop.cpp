@@ -74,8 +74,15 @@ bool story_map(int id) {
     return overlay_bank(id, b, sub) && b >= 4 && b <= 12;
 }
 
-bool story() {
-    return sess().on && story_map(sess().overlay);
+// Bit 2 of the game flags at D_802AC610 is set by func_80297ADC, which starts the attract
+// sequence (intro and demo stages played from recorded input), and by arena setup. Pressing Start
+// returns to the title, which resets the flags.
+bool attract_running(uint8_t* rdram) {
+    return (word(rdram, 0x802AC610u) & 0x4) != 0;
+}
+
+bool story(uint8_t* rdram) {
+    return sess().on && story_map(sess().overlay) && !attract_running(rdram);
 }
 
 float f32_at(uint8_t* rdram, uint32_t addr) {
@@ -180,7 +187,7 @@ int sticky_target(uint8_t* rdram);
 // `site` is the caller's return address for getMainPlayer, or the lw address for a direct read.
 int resolved_slot(uint8_t* rdram, uint32_t site) {
     int slot = word(rdram, 0x802AC894u);
-    if (!story()) {
+    if (!story(rdram)) {
         return slot;
     }
     int category = category_of_site(sess().overlay, site);
@@ -328,6 +335,46 @@ void place_human(uint8_t* rdram, int slot, float x, float y, float z, float angl
     store_f32(rdram, body + 0x14, y);
     store_f32(rdram, body + 0x18, z);
     store_f32(rdram, body + 0x20, angle);
+    // The collision record's previous position. func_802909FC sweeps the body from there, so
+    // after a fall the body went back below the kill plane and died again on every tick.
+    uint32_t rec = static_cast<uint32_t>(word(rdram, base + 0x28));
+    store_f32(rdram, rec + 0x58, x);
+    store_f32(rdram, rec + 0x5C, y);
+    store_f32(rdram, rec + 0x60, z);
+}
+
+// -10000 on every axis is where the game parks a bomber that is not on the map.
+bool parked(float x) {
+    return x <= -9000.0f;
+}
+
+// Some entries (a director warp into 5.1, for one) leave slot 0's spawn parked and place the
+// leader's body from the stage entry instead. A checkpoint and teammates copied from the spawn
+// would then sit in the void, so take both from the leader's body once it is on the map.
+void settle_parked_checkpoint(uint8_t* rdram) {
+    uint8_t* rec = rule(rdram);
+    if (rec[0x28] == 0 || !parked(f32_at(rdram, bm64::coop::kRuleBase + 0x2C))) {
+        return;
+    }
+    int leader = word(rdram, 0x802AC894u);
+    if (leader < 0 || leader >= bm64::coop::kPlayerSlots) {
+        leader = 0;
+    }
+    uint32_t leader_base = bm64::coop::kPlayerBase + static_cast<uint32_t>(leader) * bm64::coop::kPlayerStride;
+    float x = 0, y = 0, z = 0;
+    if (!obj_pos(rdram, static_cast<uint32_t>(word(rdram, leader_base + 0x28)), x, y, z) || parked(x)) {
+        return;
+    }
+    write_checkpoint(rdram, x, y, z);
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+        float bx = 0, by = 0, bz = 0;
+        if (i == leader || word(rdram, base + 0x24) != 1 ||
+            !obj_pos(rdram, static_cast<uint32_t>(word(rdram, base + 0x28)), bx, by, bz) || !parked(bx)) {
+            continue;
+        }
+        place_human(rdram, i, x + kPartySpacing * static_cast<float>(party_rank(rdram, i)), y, z, f32_at(rdram, base + 0x0C));
+    }
 }
 
 bool cutscene_running(uint8_t* rdram) {
@@ -480,7 +527,7 @@ bool omit_render_camera() {
 }
 
 void hand_to_ai(uint8_t* rdram, int player) {
-    int slot = story() ? slot_of_player(rdram, player) : player;
+    int slot = story(rdram) ? slot_of_player(rdram, player) : player;
     if (slot < 0 || slot >= bm64::coop::kPlayerSlots) {
         return;
     }
@@ -492,10 +539,11 @@ void hand_to_ai(uint8_t* rdram, int player) {
 
 void apply_rules(uint8_t* rdram) {
     Session& s = sess();
-    if (story()) {
+    if (story(rdram)) {
         if (s.unlimited) {
             set_word(rdram, 0x802AC624, 99);
         }
+        settle_parked_checkpoint(rdram);
         note_checkpoint_hearts(rdram);
         apply_cutscene_hide(rdram);
         separate_humans(rdram);
@@ -543,7 +591,7 @@ extern "C" int bm64_resolved_slot_at(uint8_t* rdram, uint32_t site) {
 extern "C" void bm64_coop_trigger_slot(uint8_t* rdram, recomp_context* ctx) {
     int slot = _arg<0, int32_t>(rdram, ctx);
     uint32_t body = 0;
-    bool ok = story() && slot >= 0 && slot < bm64::coop::kPlayerSlots &&
+    bool ok = story(rdram) && slot >= 0 && slot < bm64::coop::kPlayerSlots &&
               word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride + 0x24) == 1 &&
               slot_body(rdram, slot, body);
     _return(ctx, ok ? 1 : 0);
@@ -553,7 +601,7 @@ extern "C" void bm64_coop_trigger_slot(uint8_t* rdram, recomp_context* ctx) {
 // A teammate still standing, or a shared life left, puts this bomber back at the checkpoint
 // and makes that branch look like the hit was survived. A wipe with no lives falls through.
 extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
-    if (!story()) {
+    if (!story(rdram)) {
         return;
     }
     int player = static_cast<int>(MEM_W(0x70, ctx->r29));
@@ -605,13 +653,20 @@ extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
         float angle = f32_at(rdram, base + 0x0C);
         place_human(rdram, player, x + kPartySpacing * static_cast<float>(party_rank(rdram, player)), y, z, angle);
     }
+    // Bit 30 of the object's flags makes func_8024E088 call func_80248148 with kind 3 (an
+    // instant kill) on every tick until it clears. The game's own death resets the object; a
+    // respawn here keeps it, so without this the bomber dies and bursts hearts each tick.
+    uint32_t obj = static_cast<uint32_t>(word(rdram, base + 0x28));
+    if ((obj & 0xFF000000u) == 0x80000000u) {
+        set_word(rdram, obj + 0x10, static_cast<int32_t>(static_cast<uint32_t>(word(rdram, obj + 0x10)) & ~0x40000000u));
+    }
     std::printf("[bm64 coop] Player %d respawned, shared lives %d\n", player, word(rdram, 0x802AC624));
 }
 
 // func_802512F8 just moved one bomber onto that slot's spawn. The same point is the
 // party's checkpoint, and every human is moved there.
 extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
-    if (!story()) {
+    if (!story(rdram)) {
         return;
     }
     uint32_t snapped = static_cast<uint32_t>(ctx->r2);
@@ -653,7 +708,7 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
 // slots 0-3; slots 4-7 keep the file of the previous spawn, so rival-map teammates came out white.
 // a1 holds the parts file for g_AssignModelParts. Rival maps spawn the rival with black (0x4B).
 extern "C" void bm64_coop_spawn_color(uint8_t* rdram, recomp_context* ctx) {
-    if (!story()) {
+    if (!story(rdram)) {
         return;
     }
     int slot = static_cast<int>(ctx->r19);
@@ -676,7 +731,7 @@ extern "C" void bm64_coop_spawn_color(uint8_t* rdram, recomp_context* ctx) {
 
 extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
     Session& s = sess();
-    if (!story()) {
+    if (!story(rdram)) {
         return;
     }
     // func_80245CDC visits every reserved slot. Rival maps drive 1..3 themselves, so co-op
@@ -813,12 +868,12 @@ void ensure_blocks(uint8_t* rdram) {
 }
 
 bool camera_multi(uint8_t* rdram) {
-    return story() && meta(rdram, 2) != 0;
+    return story(rdram) && meta(rdram, 2) != 0;
 }
 
 // True when `slot` is a human with its own camera block this tick.
 bool has_camera_block(uint8_t* rdram, int slot) {
-    if (!story() || meta(rdram, 4) == 0 || slot < 0 || slot >= bm64::coop::kCamCount) {
+    if (!story(rdram) || meta(rdram, 4) == 0 || slot < 0 || slot >= bm64::coop::kCamCount) {
         return false;
     }
     int count = meta(rdram, 0);
@@ -834,7 +889,7 @@ bool has_camera_block(uint8_t* rdram, int slot) {
 }
 
 extern "C" void bm64_camera_enter(uint8_t* rdram) {
-    if (!story()) {
+    if (!story(rdram)) {
         return;
     }
     int index = meta(rdram, 1);
@@ -898,14 +953,14 @@ extern "C" int bm64_camera_mode_word(uint8_t* rdram) {
 // The C-button read in func_80235934 passes this slot to func_802399AC, whose port hook
 // turns it into the pad that drives the slot.
 extern "C" int bm64_camera_port(uint8_t* rdram) {
-    if (!story()) {
+    if (!story(rdram)) {
         return 0;
     }
     return meta(rdram, 3);
 }
 
 extern "C" void bm64_camera_broadcast(uint8_t* rdram) {
-    if (!story()) {
+    if (!story(rdram)) {
         return;
     }
     ensure_blocks(rdram);
@@ -952,7 +1007,7 @@ extern "C" void bm64_camera_frame(uint8_t* rdram, recomp_context* ctx) {
 // four ports exist, so a slot is mapped to the pad of the session player who owns it.
 // Returns -1 when the slot must read no input.
 extern "C" int bm64_coop_port(uint8_t* rdram, int port) {
-    if (!story() || port < 0 || port >= bm64::coop::kPlayerSlots) {
+    if (!story(rdram) || port < 0 || port >= bm64::coop::kPlayerSlots) {
         return port;
     }
     return player_of_slot(rdram, port);

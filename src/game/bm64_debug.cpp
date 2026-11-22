@@ -150,6 +150,7 @@ namespace {
     constexpr uint32_t level_loader = 0x802AC5D0;
     constexpr uint32_t next_scene = 0x802AC5D4;
     constexpr uint32_t scene_lock = 0x802A01B4;
+    constexpr uint32_t game_flags = 0x802AC610;
     constexpr uint32_t battle_settings = 0x802AC660;
     constexpr uint8_t first_arena_scene = 0x90;
     constexpr uint8_t last_arena_scene = 0x99;
@@ -213,6 +214,9 @@ namespace {
         }
         write_u32(rdram, next_scene, scene);
         write_u32(rdram, 0x802AC5DC, scene);
+        // Warps leave from the title or the intro, where the attract sequence keeps bits 0, 2 and 3
+        // of D_802AC610 set (HUD hidden, co-op off). Through the menus they are clear by the stage.
+        write_u32(rdram, game_flags, read_u32(rdram, game_flags) & ~0xDu);
         // The game enters 2E only from 2D, with entry 0x12. Entry 0x10 there reads a player object
         // that does not exist yet (func_80250338).
         const uint32_t entry = scene == 0x2E ? 0x12 : 0x10;
