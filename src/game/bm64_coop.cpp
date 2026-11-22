@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -270,7 +271,10 @@ int player_of_slot(uint8_t* rdram, int slot) {
     return mapped - 1;
 }
 
-// Position in the party, which spaces teammates 40 units apart. Rival maps put teammates in
+// Distance between teammates placed in a row. Bombers 50 units apart or closer are stuck together.
+constexpr float kPartySpacing = 60.0f;
+
+// Position in the party, which spaces teammates kPartySpacing apart. Rival maps put teammates in
 // slots 4..7, so the slot number itself is too far from the checkpoint.
 int party_rank(uint8_t* rdram, int slot) {
     int player = player_of_slot(rdram, slot);
@@ -368,6 +372,45 @@ void apply_cutscene_hide(uint8_t* rdram) {
     }
 }
 
+// Two bombers whose bodies are 50 units apart or closer can neither of them move (52 is free).
+// Map 4.10 moves the leader's body 50 units from its spawn floats, onto a spaced teammate.
+// Push a teammate out to kPartySpacing from any human it overlaps.
+void separate_humans(uint8_t* rdram) {
+    constexpr float kOverlap = 50.25f;
+    constexpr float kGap = kPartySpacing;
+    int leader = word(rdram, 0x802AC894u);
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        uint32_t ibase = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
+        uint32_t ibody = 0;
+        if (i == leader || word(rdram, ibase + 0x24) != 1 || !slot_body(rdram, i, ibody)) {
+            continue;
+        }
+        for (int j = 0; j < bm64::coop::kPlayerSlots; j++) {
+            uint32_t jbase = bm64::coop::kPlayerBase + static_cast<uint32_t>(j) * bm64::coop::kPlayerStride;
+            uint32_t jbody = 0;
+            if (j == i || word(rdram, jbase + 0x24) != 1 || !slot_body(rdram, j, jbody)) {
+                continue;
+            }
+            float dx = f32_at(rdram, ibody + 0x10) - f32_at(rdram, jbody + 0x10);
+            float dz = f32_at(rdram, ibody + 0x18) - f32_at(rdram, jbody + 0x18);
+            float d2 = dx * dx + dz * dz;
+            if (d2 >= kOverlap * kOverlap) {
+                continue;
+            }
+            float d = std::sqrt(d2);
+            float ux = d > 0.001f ? dx / d : 1.0f;
+            float uz = d > 0.001f ? dz / d : 0.0f;
+            store_f32(rdram, ibody + 0x10, f32_at(rdram, jbody + 0x10) + ux * kGap);
+            store_f32(rdram, ibody + 0x18, f32_at(rdram, jbody + 0x18) + uz * kGap);
+            static int logged = 0;
+            if (logged < 8) {
+                logged++;
+                std::printf("[bm64 coop] Moved player slot %d out of slot %d (%.0f apart)\n", i, j, d);
+            }
+        }
+    }
+}
+
 void note_checkpoint_hearts(uint8_t* rdram) {
     uint8_t* rec = rule(rdram);
     if (rec[0x28] == 0 || rec[0x29] != 0) {
@@ -455,6 +498,7 @@ void apply_rules(uint8_t* rdram) {
         }
         note_checkpoint_hearts(rdram);
         apply_cutscene_hide(rdram);
+        separate_humans(rdram);
     }
     if (const char* probe = std::getenv("BM64_SLOT_PROBE")) {
         if (probe[0] != '\0' && probe[0] != '0' && !s.probed && bm64::debug::tick() == 200) {
@@ -559,7 +603,7 @@ extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
         float y = f32_at(rdram, bm64::coop::kRuleBase + 0x30);
         float z = f32_at(rdram, bm64::coop::kRuleBase + 0x34);
         float angle = f32_at(rdram, base + 0x0C);
-        place_human(rdram, player, x + 40.0f * static_cast<float>(party_rank(rdram, player)), y, z, angle);
+        place_human(rdram, player, x + kPartySpacing * static_cast<float>(party_rank(rdram, player)), y, z, angle);
     }
     std::printf("[bm64 coop] Player %d respawned, shared lives %d\n", player, word(rdram, 0x802AC624));
 }
@@ -601,7 +645,7 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
             continue;
         }
         int rank = party_rank(rdram, i);
-        place_human(rdram, i, x + 40.0f * static_cast<float>(rank == 0 ? (snapped_rank == 0 ? 1 : snapped_rank) : rank), y, z, angle);
+        place_human(rdram, i, x + kPartySpacing * static_cast<float>(rank == 0 ? (snapped_rank == 0 ? 1 : snapped_rank) : rank), y, z, angle);
     }
 }
 
@@ -637,9 +681,14 @@ extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
                         word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(axis) * 4));
                 }
                 float x = std::bit_cast<float>(static_cast<uint32_t>(word(rdram, slot)));
-                x += 40.0f * static_cast<float>(placed);
+                x += kPartySpacing * static_cast<float>(placed);
                 set_word(rdram, slot, static_cast<int32_t>(std::bit_cast<uint32_t>(x)));
             }
+        }
+        // Only slot 0's hearts come from the save. A teammate left at 0 goes down on its first hit.
+        int leader_hearts = word(rdram, bm64::coop::kPlayerBase + 0x14);
+        if (i != 0 && word(rdram, slot + 0x14) <= 0 && leader_hearts > 0) {
+            set_word(rdram, slot + 0x14, leader_hearts);
         }
         // Session player n's pad is on port n. A bomber reads the port equal to its slot.
         ports[i] = static_cast<uint8_t>(placed + 1);

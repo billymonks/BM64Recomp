@@ -979,8 +979,22 @@ Unattended runs with the user's permission. No one watched a window.
 | `0x58` | 7.1 | 2401 | PASS | PASS |
 
 - An earlier pass (`runs\st\coop2`, before the overlay-id fix under 6.3) also passed, but on 4.1 and 4.10 player 2 never spawned, so only 5.1 had two bombers. That run is how the bug was found.
-- **Open: heap on 4.10 with co-op.** The 4.10 recording stopped at tick 1200 with `Allocation failed: file 0x323 size 0x7910 slot 11`. The solo director run of the same scene loads `0x323` without failing. The director warps there from the title, and the same warp was the whole cause of the Battle heap failures (see "Heap exhaustion in Battle" in `game-internals.md`), so this may be a director effect. Check: in local co-op, reach 4.10 through the world map and play past the first minute. If it fails there too, the extra bomber on a 5-bomber map overflows the 1 MB heap.
+- **Heap on 4.10 with co-op (resolved 2026-11-22).** The 4.10 recording stopped at tick 1200 with `Allocation failed: file 0x323 size 0x7910 slot 11`. The solo director run of the same scene loads `0x323` without failing. The director warps there from the title, and the same warp was the whole cause of the Battle heap failures (see "Heap exhaustion in Battle" in `game-internals.md`). The user's run `coop_410b.bm64rec` reached 4.10 through the world map and played 2,540 ticks there with no allocation failure, so the failure was the warp. Co-op still costs heap: at tick 3000 on 4.10 the co-op replay has 828 KB of the 1 MB break in use, solo 704 KB (`runs\re\heapwalk.py`).
 - Director co-op input drives port 0 only. Player 2 stands still, so these runs cover spawning, cameras, the port map, respawns and enemy targeting near an idle teammate, not two players moving.
+- Correction (2026-11-22): in every co-op run above, both humans were stuck in place. See "User check 1 on 4.10" below.
+
+### User check 1 on 4.10 (2026-11-22)
+
+The user played local co-op with two controllers through the world map to 4.10 (`coop_410b.bm64rec`). Report: the bombers were stacked on the spawn and could not move; the rival kept hitting both humans and hurting itself; hearts fell out of the humans repeatedly.
+
+- **Stuck humans (fixed).** Two bomber bodies 50 units apart or closer can neither of them move; 52 is free. This was measured by pushing player 2 out to 45, 50, 52, 55, 60, 80 and 100 units on the replay. Co-op placed teammates 40 units apart, so on every map they spawned inside each other. On 4.10 it was worse: the overlay moves the leader's body 50 units from its spawn floats (2300 to 2350), onto the teammate at 2340. In the replay neither body moved from tick 1236 to 3776, although both pads pushed the stick from tick 2000. Fix: spawns, respawns and checkpoint snaps space teammates 60 units apart (`kPartySpacing`), and every story tick pushes a teammate out to 60 from any human closer than 50.25 (`separate_humans`). The push also fired twice in the middle of the fight (48 and 50 apart), so the bodies can reach locking distance in normal play, not only at spawn.
+- **Teammate hearts (fixed).** Only slot 0's hearts (`+0x14`) come from the save; slot 4 started 4.10 with 0, so player 2 went down on every hit. `bm64_coop_before_stage` now gives a teammate at 0 hearts the leader's count.
+- **Rival hurting itself.** Not a co-op bug. With the humans frozen next to each other, the rival's own blasts hit it (hearts 3 to 0 by tick 3000). In the fixed replay, the rival keeps 3 hearts through tick 3000, as it does in the solo replay of the same inputs. The rival dropping in at tick 2000 from (-10000, -10000, -10000) also happens solo.
+- **"4 white bombers".** Not confirmed. The slot dumps show two humans (slots 0 and 4) and the rival in slot 1; slots 2, 3, 5, 6 and 7 stay empty for the whole map.
+- **Checks.**
+  - SyncTest at depths 1 and 12 passes on `coop_410b.bm64rec` (4,453 ticks).
+  - It also passes on `runs\test_coop2.bm64rec`, which is `test.bm64rec` with a version 2 co-op header: 9,591 ticks, about 8,300 of them on 4.1 reached through the world map, with player 2 idle.
+  - The director SyncTest on scene `0x28` (`runs\st\coop5`) now stops at tick 1823 with `Allocation failed: file 0x183 size 0x12A0 slot 26`, and the game crashes. The same recording on the previous build ran to the end, but there the two humans were locked together and nothing happened. With the fix, the leader walks, player 2 is hit and respawns, and an on-demand load runs out of heap. The warp from the title already has 944 KB of the heap in use at tick 700. Use world-map recordings for co-op SyncTests until the director reaches stages through the menus.
 
 ## Risks and fallbacks
 
