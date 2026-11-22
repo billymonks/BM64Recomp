@@ -673,6 +673,7 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
   - Note: unlimited lives is the session flag from 4.6. While it is on, `apply_rules` writes `D_802AC624 = 99` every step, on every peer. Shared lives leave that word to the game until a human is downed.
   - Note (2026-11-19): `func_80248148` is the hit. Argument 3 or 5 clears hearts; anything else subtracts one. Hearts still above zero skip the rest. Hearts at zero continue into the sequence that stores `controlType` 3. In a session, a human on that path respawns at the checkpoint with the hearts recorded there when another human or AI still has hearts, or when more than one shared life remains. The life word is decremented unless lives are unlimited. A last bomber with one life or fewer falls through into the original sequence. Not watched in a stage.
   - Note (audit fix, 2026-11-19): respawn, the lives write and the checkpoint snap ran in every session, including online Battle, where they would have kept downed players alive. They now run only on story maps.
+  - Note (2026-11-22): on rival maps the "another bomber still has hearts" test counted the rivals in slots 1–3, so a downed teammate always respawned. Rival slots are now skipped. Respawn and the checkpoint snap spaced teammates 40 units × slot number, which put slot 4 at +160 on rival maps; they now use the session player number.
 - [ ] **6.10 Cutscenes and scripted sequences**
   - Depends on: 6.4.
   - Work: during scripts (`WM1 …` command strings, intro and outro sequences, boss intros), the leader is scripted and teammates are hidden with collision off, then restored next to the leader afterwards.
@@ -684,6 +685,7 @@ Every co-op rule (spawning, port mapping, main-player resolution, cameras, respa
     4. [agent] A softlock usually means the script waits for a condition on "all players", for example all bombers idle or none in a trigger zone. Find the wait loop in that overlay and make it ignore hidden humans, or teleport them out of the zone at hide time.
     5. Tick when every cutscene row passes.
   - Note (2026-11-19): while any active process entry is classified as a cutscene, every human other than `D_802AC894` has collision (`player+0x48`) forced off and bit 30 set on the bomber object's flag word. Both are restored when no such process remains. Not watched in a stage.
+  - Correction (2026-11-22): bit 30 of the bomber object's flag word (`obj+0x10`) is not a hide flag. `func_8024E088` turns it into `func_80248148(i, 3)` at `0x8024E324` every tick, so a hidden teammate was killed and respawned every tick. On rival map 4.10 the user's game locked up 33 ticks after such a sequence started (found with a hardware write watch on the flag word). The hide now only switches collision off; teammates stay visible during cutscenes. A real hide flag is still to be found.
 - [ ] **6.11 Co-op HUD**
   - Depends on: 6.3.
   - Work: show the local player's hearts, bombs and fire; small teammate indicators; shared lives and gems.

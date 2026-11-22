@@ -270,6 +270,13 @@ int player_of_slot(uint8_t* rdram, int slot) {
     return mapped - 1;
 }
 
+// Position in the party, which spaces teammates 40 units apart. Rival maps put teammates in
+// slots 4..7, so the slot number itself is too far from the checkpoint.
+int party_rank(uint8_t* rdram, int slot) {
+    int player = player_of_slot(rdram, slot);
+    return player >= 0 ? player : slot;
+}
+
 int slot_of_player(uint8_t* rdram, int player) {
     for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
         int control = word(rdram, bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride + 0x24);
@@ -350,18 +357,12 @@ void apply_cutscene_hide(uint8_t* rdram) {
                 saved[i] = word(rdram, base + 0x48);
                 hidden[i] = 1;
             }
+            // Bit 30 of the bomber object's flag word is not a hide flag: func_8024E088 turns it
+            // into a kind-3 hit (0x8024E300) every tick, so only collision is switched off.
             set_word(rdram, base + 0x48, 0);
-            uint32_t obj = static_cast<uint32_t>(word(rdram, base + 0x28));
-            if ((obj & 0xFF000000u) == 0x80000000u) {
-                set_word(rdram, obj + 0x10, word(rdram, obj + 0x10) | 0x40000000);
-            }
         }
         else if (hidden[i] != 0) {
             set_word(rdram, base + 0x48, saved[i]);
-            uint32_t obj = static_cast<uint32_t>(word(rdram, base + 0x28));
-            if ((obj & 0xFF000000u) == 0x80000000u) {
-                set_word(rdram, obj + 0x10, word(rdram, obj + 0x10) & ~0x40000000);
-            }
             hidden[i] = 0;
         }
     }
@@ -519,9 +520,10 @@ extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
     if (word(rdram, self + 0x24) != 1) {
         return;
     }
+    bool rival = rival_map(sess().overlay);
     bool other = false;
     for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
-        if (i == player) {
+        if (i == player || (rival && i >= 1 && i <= 3)) {
             continue;
         }
         uint32_t base = bm64::coop::kPlayerBase + static_cast<uint32_t>(i) * bm64::coop::kPlayerStride;
@@ -557,7 +559,7 @@ extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
         float y = f32_at(rdram, bm64::coop::kRuleBase + 0x30);
         float z = f32_at(rdram, bm64::coop::kRuleBase + 0x34);
         float angle = f32_at(rdram, base + 0x0C);
-        place_human(rdram, player, x + 40.0f * static_cast<float>(player), y, z, angle);
+        place_human(rdram, player, x + 40.0f * static_cast<float>(party_rank(rdram, player)), y, z, angle);
     }
     std::printf("[bm64 coop] Player %d respawned, shared lives %d\n", player, word(rdram, 0x802AC624));
 }
@@ -589,6 +591,7 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
     float z = f32_at(rdram, base + 0x08);
     float angle = f32_at(rdram, base + 0x0C);
     write_checkpoint(rdram, x, y, z);
+    int snapped_rank = party_rank(rdram, slot);
     for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
         if (i == slot) {
             continue;
@@ -597,7 +600,8 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
         if (word(rdram, other + 0x24) != 1) {
             continue;
         }
-        place_human(rdram, i, x + 40.0f * static_cast<float>(i == 0 ? 1 : i), y, z, angle);
+        int rank = party_rank(rdram, i);
+        place_human(rdram, i, x + 40.0f * static_cast<float>(rank == 0 ? (snapped_rank == 0 ? 1 : snapped_rank) : rank), y, z, angle);
     }
 }
 
