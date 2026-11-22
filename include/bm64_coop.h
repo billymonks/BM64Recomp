@@ -40,7 +40,10 @@ constexpr uint32_t kCamStateEnd = kCamBlocks + kCamStride * kCamCount;
 // Checkpoint, cutscene hide and port map. Snapped with the rest of the player state.
 // 8 hidden flags, 8 saved collision words, one party checkpoint, 8 heart counts, 8 port bytes.
 constexpr uint32_t kRuleBase = kCamStateEnd;
-constexpr uint32_t kStateEnd = kRuleBase + 0x60;
+// Highest break the sbrk patch has granted (BM64_HEAP_MARK in patches/required_patches.c).
+// It lives here so the snapshot and the hash carry it; see bm64::debug::heap_top.
+constexpr uint32_t kHeapMark = kRuleBase + 0x60;
+constexpr uint32_t kStateEnd = kHeapMark + 0x10;
 
 int local_player();
 // The session player whose camera is rendered. Host-only: it never touches game memory.

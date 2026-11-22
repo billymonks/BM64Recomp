@@ -26,6 +26,8 @@
 
 static_assert(bm64::debug::kSlotDumpBase == bm64::coop::kPlayerBase &&
               bm64::debug::kSlotDumpBase + bm64::debug::kSlotDumpBytes >= bm64::coop::kStateEnd);
+// BM64_HEAP_MARK in patches/required_patches.c.
+static_assert(bm64::coop::kHeapMark == 0x80F01F20);
 
 namespace {
     constexpr uint32_t num_ports = 4;
@@ -62,7 +64,7 @@ namespace {
                         { 0x802A5554, 0x802A5A60 } } },
             { "prc",  { { 0x802AB200, 0x802AC3E0 } } },
             { "game", { { 0x802AC400, 0x802AD120 }, { 0x802AFC20, 0x802B36D0 } } },
-            { "heap", { { 0x802B36D0, 0x80400000 } } },
+            { "heap", { { 0x802B36D0, bm64::debug::kHeapEnd } } },
             { "slots", { { 0x80F00000, bm64::coop::kStateEnd } } },
         };
     }
@@ -513,6 +515,7 @@ namespace {
             });
         }
         const std::vector<Segment>& used = skips;
+        const uint32_t end = seg.end == bm64::debug::kHeapEnd ? bm64::debug::heap_top(rdram) : seg.end;
         uint32_t pos = seg.start;
         auto feed = [&](uint32_t from, uint32_t to) {
             if (to > from) {
@@ -521,13 +524,13 @@ namespace {
             }
         };
         for (const Segment& m : used) {
-            if (m.end <= pos || m.start >= seg.end) {
+            if (m.end <= pos || m.start >= end) {
                 continue;
             }
-            feed(pos, std::min(m.start, seg.end));
+            feed(pos, std::min(m.start, end));
             pos = std::max(pos, m.end);
         }
-        feed(pos, seg.end);
+        feed(pos, end);
     }
 
     // Writes RDRAM in N64 (big-endian) byte order; rdram holds each 32-bit word in host order.
@@ -1286,6 +1289,12 @@ DebugState& dbg() { return state; }
 }
 
 namespace bm64::debug {
+
+uint32_t heap_top(const uint8_t* rdram) {
+    uint32_t mark = *reinterpret_cast<const uint32_t*>(rdram + (bm64::coop::kHeapMark - 0x80000000u));
+    uint32_t top = (mark + 0xFFFu) & ~0xFFFu;
+    return std::clamp(top, kHeapRomEnd, kHeapEnd);
+}
 
 InputCursor input_cursor() {
     InputCursor cursor;

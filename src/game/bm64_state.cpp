@@ -20,7 +20,7 @@
 namespace bm64::state {
 
 constexpr uint32_t kMagic = 0x4E534D42u; // 'BMSN' little-endian
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 constexpr int kRing = 16;
 // Online rollback is clamped to 12 so it never rewinds into a snapshot the ring has overwritten.
 // SyncTest refuses a deeper window than that, because a deeper one cannot happen in a session.
@@ -99,7 +99,7 @@ std::vector<Segment> segments() {
         { 0x802AB200, 0x802AC3E0 },
         { 0x802AC400, 0x802AD120 },
         { 0x802AFC20, 0x802B36D0 },
-        { 0x802B36D0, 0x80400000 },
+        { 0x802B36D0, bm64::debug::kHeapEnd },
         // Relocated player array. Leaving it out of the snapshot makes rollback
         // keep a dangling object pointer and fault on the next resim.
         { 0x80F00000, bm64::coop::kStateEnd },
@@ -405,7 +405,12 @@ std::vector<uint8_t> capture(uint8_t* rdram) {
         write_bytes(out, rdram + (start - 0x80000000u), end - start);
     };
     for (const Segment& s : hash_segments_storage()) {
-        append_range(s.start, s.end);
+        uint32_t end = s.end;
+        if (end == bm64::debug::kHeapEnd) {
+            end = bm64::debug::heap_top(rdram);
+            write_u32(out, end);
+        }
+        append_range(s.start, end);
     }
     // Not part of the sync hash. The file loader's lock sits just before gFrontBufferID. The first
     // pass leaves it set, and the reload then allocates from a different free-list bin.
@@ -455,8 +460,21 @@ bool restore(uint8_t* rdram, const uint8_t* data, size_t size) {
         size_t n = end - start;
         r.bytes(rdram + (start - 0x80000000u), n);
     };
+    // Memory above the snapshot's heap top had never been handed out at that tick, so it was zero.
+    const uint32_t live_top = bm64::debug::heap_top(rdram);
     for (const Segment& s : hash_segments_storage()) {
-        read_range(s.start, s.end);
+        uint32_t end = s.end;
+        if (end == bm64::debug::kHeapEnd) {
+            end = r.u32();
+            if (!r.ok || end < bm64::debug::kHeapRomEnd || end > bm64::debug::kHeapEnd) {
+                std::fprintf(stderr, "[bm64 state] Snapshot heap top rejected\n");
+                return false;
+            }
+            if (live_top > end) {
+                std::memset(rdram + (end - 0x80000000u), 0, live_top - end);
+            }
+        }
+        read_range(s.start, end);
     }
     read_range(0x8029F580, 0x8029F5E4);
     read_range(kSoundSlots, kSoundSlotsEnd);

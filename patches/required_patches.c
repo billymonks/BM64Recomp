@@ -1450,6 +1450,28 @@ RECOMP_EXPORT void clearTrackedTexture(void) {
     }
 }
 
+// sbrk for the game's malloc. The ROM refuses a break past 0x80400000 (1 MB of heap), which a second
+// bomber or a scene warp from the title can exceed. Nothing uses 0x80400000-0x80800000, so the break
+// may grow to BM64_HEAP_END (bm64::debug::kHeapEnd on the host). free() shrinks the break, so the
+// highest break granted is kept at BM64_HEAP_MARK (bm64::coop::kHeapMark); the hash and snapshot
+// cover the heap up to it. Like the ROM, a refused request still stores the new break.
+#define BM64_HEAP_END 0x80500000
+#define BM64_HEAP_MARK (*(volatile u32*)0x80F01F20)
+extern u8* D_8029F5A0;
+
+RECOMP_PATCH void* func_80225B00(s32 incr) {
+    u8* old = D_8029F5A0;
+    u32 brk = (u32)(old + incr);
+    D_8029F5A0 = (u8*)brk;
+    if ((s32)(brk - 0x80300000) >= (s32)(BM64_HEAP_END - 0x80300000)) {
+        return (void*)-1;
+    }
+    if (brk > BM64_HEAP_MARK) {
+        BM64_HEAP_MARK = brk;
+    }
+    return old;
+}
+
 // allocate and load model
 RECOMP_PATCH void *func_8026CE28(s32 fileID) {
     s32 id;

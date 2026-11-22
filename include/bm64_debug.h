@@ -79,6 +79,14 @@ namespace bm64::debug {
     constexpr uint32_t kSlotDumpBase = 0x80F00000;
     constexpr uint32_t kSlotDumpBytes = 0x2000;
     void dump_slots_to(const uint8_t* slots, const std::filesystem::path& path);
+    // End of the malloc heap. The sbrk patch in patches/required_patches.c (BM64_HEAP_END) lets
+    // the break grow this far instead of the ROM's 0x80400000.
+    constexpr uint32_t kHeapEnd = 0x80500000;
+    constexpr uint32_t kHeapRomEnd = 0x80400000;
+    // A segment ending at kHeapEnd is hashed and snapshotted only up to this address: the highest
+    // break ever granted, rounded up to a page, never below kHeapRomEnd. Memory above it has never
+    // been handed out, so it is still zero.
+    uint32_t heap_top(const uint8_t* rdram);
 }
 
 #endif
