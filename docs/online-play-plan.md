@@ -1111,6 +1111,22 @@ Investigated by replay of `coop_410d.bm64rec` (the replay reproduces the session
 - Not watched in a window. Next user check: on 4.10 with two players, keep player 1 still and walk player 2 up to the rival; it should turn to player 2 within about two seconds.
 - `run-synctest-scenes.ps1` and `run-synctest-coverage.ps1` take `-Exe`, so a copy of the exe can be tested while the user's game holds `build\BM64Recompiled.exe` open.
 
+### Co-op camera controls (`coop_goal.bm64rec`, 2026-11-22)
+
+- Report, as given: "I'm only able to rotate the camera with left C 1 time, the camera will never change again. Right C didn't do anything. Touching F9 did nothing. P2 camera controls did nothing." Inputs in the recording were correct per port (player 2's C-buttons on port 1), so the rebinding was fine.
+- **Causes** (from `BM64_CAM_TRACE=N`, which prints the meta bytes, the live camera and every block):
+  - The camera-command broadcast also fired from inside the controller's per-player passes, so every block was overwritten with the same camera. That made F9 (which worked) and player 2's C-buttons look dead.
+  - The controller's stack locals (rotation copy and button at `sp+0x7C`) were shared between the passes, so the rotation state stuck at `0x8000` after one turn.
+  - The rotation animation process `func_80236658` wrote to the first human's live camera, whoever spawned it.
+- **Fix.** Per-player saved controller locals (`kCamLocals`); an owner byte per process slot (`kCamProcOwner`) set in `HuPrcCreate` (`bm64_coop_process_created`) when the controller spawns the animation, and the owner's block swapped in around each resume (`bm64_coop_process_resume` in the `patches/process.c` scheduler); no broadcast during a pass or from an owned process. `kStateEnd` is now `0x80F02000`, so the `slots` hash differs from older builds. Details under "Camera" in `game-internals.md`.
+- **`BM64_DIRECTOR_COOP=camera`**: like `buttons`, plus a random C-button on 1 in 6 holds. `move` and `buttons` draw the same random numbers as before.
+- **Checks.**
+  - Trace of `coop_goal.bm64rec`: player 1 rotates 270 → 225 → 180, player 2's block 270 → 315 → 270 → 315 and zooms 2000 → 2400, and the state returns to 0 after each turn.
+  - SyncTest of `coop_goal.bm64rec` at depths 1 and 12: pass, 2,586 ticks (`runs\st\camfix\goal`).
+  - Co-op director SyncTests, `BM64_COOP_LOCAL=2`, `BM64_DIRECTOR_COOP=camera`, `BM64_SEED=431DE7EA`, `-Secs 40` (`runs\st\camfix\scenes`): scenes `0x28` and `0x31` pass at depths 1 and 12, 5,401 ticks. In `0x28` player 2's block turned on its own (225°, 180°, 270°, zoom changes) while player 1's stayed at 270°. In `0x31` the fight script sets the camera every tick, so both blocks match there.
+  - Single-player `test.bm64rec`: two runs of the new build are identical on all 9,591 ticks. Against the previous build (`runs\st\rivaltgt\solo`), `game` differs from tick 0 (the `free_hook` pointer moved), `bss` on 235 ticks (stack leftovers), and `slots` (larger range); the rest match.
+- Not watched in a window. Next user check: player 1's and player 2's C-buttons each turn their own camera, repeatedly; F9 switches the window to player 2's camera.
+
 ## Risks and fallbacks
 
 - **Coroutine snapshots (3.2–3.3)** are the biggest technical risk. Fallback: delay-based lockstep needs no snapshots; Battle still ships, with more input delay.

@@ -43,7 +43,14 @@ constexpr uint32_t kRuleBase = kCamStateEnd;
 // Highest break the sbrk patch has granted (BM64_HEAP_MARK in patches/required_patches.c).
 // It lives here so the snapshot and the hash carry it; see bm64::debug::heap_top.
 constexpr uint32_t kHeapMark = kRuleBase + 0x60;
-constexpr uint32_t kStateEnd = kHeapMark + 0x10;
+// One byte per process slot: 1 + the bomber slot whose camera block a camera-animation process
+// (func_80236658) works on, or 0 for the shared live camera.
+constexpr uint32_t kCamProcOwner = kHeapMark + 0x10;
+// Per camera slot, the 16 bytes of func_80235D7C's frame that func_80235934 keeps between calls
+// (the rotation copy at sp+0x7C and the C-button halfword at sp+0x8A) for its 0x8000 follow-up.
+constexpr uint32_t kCamLocals = kCamProcOwner + kProcessSlots;
+constexpr uint32_t kCamLocalsSize = 0x10;
+constexpr uint32_t kStateEnd = kCamLocals + kCamCount * kCamLocalsSize;
 
 int local_player();
 // The session player whose camera is rendered. Host-only: it never touches game memory.

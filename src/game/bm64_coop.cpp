@@ -566,6 +566,13 @@ int local_player() {
 }
 
 int view_player() {
+    static const bool seeded = [] {
+        if (const char* v = std::getenv("BM64_VIEW_PLAYER")) {
+            g_view_player.store(std::atoi(v) - 1);
+        }
+        return true;
+    }();
+    (void)seeded;
     int v = g_view_player.load();
     return v >= 0 && v < sess().players ? v : sess().local_player;
 }
@@ -820,7 +827,6 @@ extern "C" void bm64_coop_spawn_color(uint8_t* rdram, recomp_context* ctx) {
     static constexpr int32_t colors[4] = { 0x4A, 0x4B, 0x4C, 0x4D };
     ctx->r5 = colors[rank % 4];
 }
-
 extern "C" void bm64_coop_before_stage(uint8_t* rdram) {
     Session& s = sess();
     if (!story(rdram)) {
@@ -980,9 +986,96 @@ bool has_camera_block(uint8_t* rdram, int slot) {
     return false;
 }
 
+int g_broadcasts = 0;
+
+constexpr uint32_t kCurrentProcess = 0x802AC344u;
+constexpr uint32_t kProcessPool = 0x80063370u;
+constexpr uint32_t kProcessSize = 0x8A0u;
+constexpr uint32_t kCameraController = 0x80235D7Cu;
+constexpr uint32_t kCameraAnimation = 0x80236658u;
+
+uint32_t process_func(uint8_t* rdram, uint32_t proc) {
+    return proc != 0 ? static_cast<uint32_t>(word(rdram, proc + 0x0C)) : 0u;
+}
+
+int process_index(uint32_t proc) {
+    if (proc < kProcessPool || (proc - kProcessPool) % kProcessSize != 0) {
+        return -1;
+    }
+    uint32_t index = (proc - kProcessPool) / kProcessSize;
+    return index < bm64::coop::kProcessSlots ? static_cast<int>(index) : -1;
+}
+
+uint8_t* process_owner(uint8_t* rdram, int index) {
+    return ram(rdram, bm64::coop::kCamProcOwner + static_cast<uint32_t>(index));
+}
+
+// func_80235D7C is the camera controller process's entry, so its frame (0x90 bytes) sits at the top
+// of the process stack. func_80235934 keeps the rotation copy ($s7, sp + 0x7C) and the C-button
+// halfword ($fp, sp + 0x8A) there between calls; one copy would serve every human's pass, so the
+// 16 bytes are kept per camera slot like the blocks.
+uint32_t controller_locals(uint8_t* rdram) {
+    uint32_t proc = static_cast<uint32_t>(word(rdram, kCurrentProcess));
+    if (process_func(rdram, proc) != kCameraController) {
+        return 0;
+    }
+    uint32_t top = static_cast<uint32_t>(word(rdram, proc + 0x24)) + static_cast<uint32_t>(word(rdram, proc + 0x20));
+    return top - 0x90 + 0x7C;
+}
+
+uint8_t* saved_locals(uint8_t* rdram, int slot) {
+    return ram(rdram, bm64::coop::kCamLocals + static_cast<uint32_t>(slot) * bm64::coop::kCamLocalsSize);
+}
+
+void load_pass(uint8_t* rdram, int slot) {
+    copy_block(rdram, slot, true);
+    if (uint32_t addr = controller_locals(rdram)) {
+        std::memcpy(ram(rdram, addr), saved_locals(rdram, slot), bm64::coop::kCamLocalsSize);
+    }
+}
+
+void save_pass(uint8_t* rdram, int slot) {
+    copy_block(rdram, slot, false);
+    if (uint32_t addr = controller_locals(rdram)) {
+        std::memcpy(saved_locals(rdram, slot), ram(rdram, addr), bm64::coop::kCamLocalsSize);
+    }
+}
+
+void trace_camera(uint8_t* rdram) {
+    static const int every = [] {
+        const char* v = std::getenv("BM64_CAM_TRACE");
+        return v ? std::atoi(v) : 0;
+    }();
+    if (every <= 0 || bm64::debug::tick() % static_cast<uint32_t>(every) != 0) {
+        return;
+    }
+    auto f = [&](uint32_t addr) { return std::bit_cast<float>(static_cast<uint32_t>(word(rdram, addr))); };
+    auto h = [&](uint32_t addr) { return static_cast<unsigned>(MEM_HU(0, static_cast<gpr>(static_cast<int32_t>(addr)))); };
+    std::printf("[bm64 cam] tick %u meta %d %d %d %d %d subj %d %d view %d bc %d live eye (%.0f,%.0f,%.0f) rot (%.1f,%.1f,%.1f) st %X/%X idx %d",
+        bm64::debug::tick(), meta(rdram, 0), meta(rdram, 1), meta(rdram, 2), meta(rdram, 3), meta(rdram, 4),
+        meta(rdram, 8), meta(rdram, 9), bm64::coop::view_player(), g_broadcasts,
+        f(0x8008E648u), f(0x8008E64Cu), f(0x8008E650u), f(0x8008F3F8u), f(0x8008F3FCu), f(0x8008F400u),
+        h(0x8008F426u), h(0x8008F424u), word(rdram, 0x8008F42Cu));
+    g_broadcasts = 0;
+    if (uint32_t addr = controller_locals(rdram)) {
+        std::printf(" btn %X rotcopy %.1f", h(addr + 0x0E), f(addr));
+    }
+    for (int i = 0; i < meta(rdram, 0) && i < 4; i++) {
+        uint32_t b = block_addr(meta(rdram, 8 + i));
+        std::printf(" | b%d eye (%.0f,%.0f,%.0f) at (%.0f,%.0f,%.0f) rot (%.1f,%.1f,%.1f) st %X/%X", meta(rdram, 8 + i),
+            f(b), f(b + 4), f(b + 8), f(b + 0x10), f(b + 0x14), f(b + 0x18),
+            f(b + kCamRotation), f(b + kCamRotation + 4), f(b + kCamRotation + 8),
+            h(b + 0x10 + 0x4E), h(b + 0x10 + 0x4C));
+    }
+    std::printf("\n");
+}
+
 extern "C" void bm64_camera_enter(uint8_t* rdram) {
     if (!story(rdram)) {
         return;
+    }
+    if (meta(rdram, 1) == 0) {
+        trace_camera(rdram);
     }
     int index = meta(rdram, 1);
     if (index == 0) {
@@ -996,7 +1089,7 @@ extern "C" void bm64_camera_enter(uint8_t* rdram) {
             unbind_camera_player(rdram);
             return;
         }
-        copy_block(rdram, ram(rdram, bm64::coop::kCamMeta)[8], false);
+        save_pass(rdram, ram(rdram, bm64::coop::kCamMeta)[8]);
         static bool announced = false;
         if (!announced) {
             announced = true;
@@ -1007,7 +1100,7 @@ extern "C" void bm64_camera_enter(uint8_t* rdram) {
         return;
     }
     int slot = ram(rdram, bm64::coop::kCamMeta)[8 + index];
-    copy_block(rdram, slot, true);
+    load_pass(rdram, slot);
     bind_camera_player(rdram, slot);
 }
 
@@ -1018,7 +1111,7 @@ extern "C" int bm64_camera_next(uint8_t* rdram) {
     int index = meta(rdram, 1);
     int count = meta(rdram, 0);
     int slot = ram(rdram, bm64::coop::kCamMeta)[8 + index];
-    copy_block(rdram, slot, false);
+    save_pass(rdram, slot);
     index++;
     uint32_t body;
     while (index < count && !slot_body(rdram, ram(rdram, bm64::coop::kCamMeta)[8 + index], body)) {
@@ -1027,15 +1120,59 @@ extern "C" int bm64_camera_next(uint8_t* rdram) {
     if (index < count) {
         set_meta(rdram, 1, static_cast<uint8_t>(index));
         int next = ram(rdram, bm64::coop::kCamMeta)[8 + index];
-        copy_block(rdram, next, true);
+        load_pass(rdram, next);
         bind_camera_player(rdram, next);
         return 1;
     }
     set_meta(rdram, 1, 0);
     set_meta(rdram, 2, 0);
-    copy_block(rdram, ram(rdram, bm64::coop::kCamMeta)[8], true);
+    load_pass(rdram, ram(rdram, bm64::coop::kCamMeta)[8]);
     unbind_camera_player(rdram);
     return 0;
+}
+
+// HuPrcCreate. A camera animation (func_80236658, started by the C-buttons in func_80235934)
+// created during a human's controller pass belongs to that human's camera block.
+extern "C" void bm64_coop_process_created(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t proc = _arg<0, uint32_t>(rdram, ctx);
+    int index = process_index(proc);
+    if (index < 0) {
+        return;
+    }
+    uint8_t owner = 0;
+    uint32_t current = static_cast<uint32_t>(word(rdram, kCurrentProcess));
+    if (story(rdram) && camera_multi(rdram) && process_func(rdram, proc) == kCameraAnimation &&
+        process_func(rdram, current) == kCameraController) {
+        owner = static_cast<uint8_t>(meta(rdram, 3) + 1);
+    }
+    *process_owner(rdram, index) = owner;
+}
+
+// The scheduler around each resume of a process. An owned camera animation runs with its
+// human's block live; between processes live memory stays on the first human, as the hash expects.
+extern "C" void bm64_coop_process_resume(uint8_t* rdram, recomp_context* ctx) {
+    uint32_t proc = _arg<0, uint32_t>(rdram, ctx);
+    bool entering = _arg<1, int32_t>(rdram, ctx) != 0;
+    int index = process_index(proc);
+    if (index < 0 || !story(rdram) || meta(rdram, 4) == 0) {
+        return;
+    }
+    int owner = *process_owner(rdram, index);
+    if (owner == 0) {
+        return;
+    }
+    int slot = owner - 1;
+    int primary = ram(rdram, bm64::coop::kCamMeta)[8];
+    if (slot == primary || slot >= bm64::coop::kCamCount) {
+        return;
+    }
+    if (entering) {
+        copy_block(rdram, primary, false);
+        copy_block(rdram, slot, true);
+    } else {
+        copy_block(rdram, slot, false);
+        copy_block(rdram, primary, true);
+    }
 }
 
 extern "C" int bm64_camera_mode_word(uint8_t* rdram) {
@@ -1051,11 +1188,21 @@ extern "C" int bm64_camera_port(uint8_t* rdram) {
     return meta(rdram, 3);
 }
 
+// Camera commands from cutscenes and overlays apply to every human. The controller's own calls
+// (a pass is in progress) and a human's C-button animation only move that human's block.
 extern "C" void bm64_camera_broadcast(uint8_t* rdram) {
     if (!story(rdram)) {
         return;
     }
+    if (camera_multi(rdram)) {
+        return;
+    }
+    int index = process_index(static_cast<uint32_t>(word(rdram, kCurrentProcess)));
+    if (index >= 0 && *process_owner(rdram, index) != 0) {
+        return;
+    }
     ensure_blocks(rdram);
+    g_broadcasts++;
     for (int i = 0; i < bm64::coop::kCamCount; i++) {
         copy_block(rdram, i, false);
     }

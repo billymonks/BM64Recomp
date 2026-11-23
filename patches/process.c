@@ -2,6 +2,7 @@
 #include "patches.h"
 #include "process.h"
 #include "process_funcs.h"
+#include "bm64_debug.h"
 
 // ============================================================================
 // Helper: Yield to scheduler with a reason
@@ -122,8 +123,12 @@ RECOMP_PATCH void HuPrcCall(void) {
             D_802AC344->coro_created = 1;
         }
 
-        // Switch to this process and wait for it to yield
+        // Switch to this process and wait for it to yield. A process that terminates itself
+        // moves D_802AC344 to its predecessor, so the resumed record is kept for the co-op hook.
+        struct Process *resumed = D_802AC344;
+        bm64_coop_process_resume(resumed, 1);
         yield_reason = recomp_process_switch_to(D_802AC344->id, 1);
+        bm64_coop_process_resume(resumed, 0);
 
         // Handle special yield reasons
         if (yield_reason == YIELD_STACKCHECK) {
@@ -134,7 +139,10 @@ RECOMP_PATCH void HuPrcCall(void) {
             }
             // Store result and resume process
             D_802AC344->yield_value = ret;
+            resumed = D_802AC344;
+            bm64_coop_process_resume(resumed, 1);
             yield_reason = recomp_process_switch_to(D_802AC344->id, ret);
+            bm64_coop_process_resume(resumed, 0);
         }
         
         // For YIELD_NORMAL and YIELD_TERMINATE, continue to next process
@@ -422,6 +430,7 @@ RECOMP_PATCH s32 HuPrcCreate(void *func, s32 arg1, void *stack, s32 stackSize, u
     process->func = (u32)func;
     process->user_data = arg1;
     process->exec_mode = 1;  // Ready to run
+    bm64_coop_process_created(process);
 
     // Set up stack
     if (stack != NULL) {

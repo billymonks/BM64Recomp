@@ -133,7 +133,7 @@ namespace {
         };
         std::vector<MenuPress> menu;
         // BM64_DIRECTOR_COOP: co-op ports 1-3 get their own random pads in stages ("move" for the
-        // stick only, "buttons" to add A and B). Off leaves them idle.
+        // stick only, "buttons" to add A and B, "camera" to add C-buttons too). Off leaves them idle.
         int coop_mode = 0;
         struct Teammate {
             uint32_t rng;
@@ -318,8 +318,11 @@ namespace {
             else if (std::strcmp(coop, "buttons") == 0) {
                 director.coop_mode = 2;
             }
+            else if (std::strcmp(coop, "camera") == 0) {
+                director.coop_mode = 3;
+            }
             else {
-                fprintf(stderr, "[bm64 director] Ignoring BM64_DIRECTOR_COOP=%s (expected move or buttons)\n", coop);
+                fprintf(stderr, "[bm64 director] Ignoring BM64_DIRECTOR_COOP=%s (expected move, buttons or camera)\n", coop);
             }
             for (uint32_t port = 1; port < 4; port++) {
                 director.teammates[port].rng = director.rng ^ (0x85EBCA6Bu * (port + 1));
@@ -411,11 +414,14 @@ namespace {
                     mate.stick_y = static_cast<int8_t>(static_cast<int>(next() % 161) - 80);
                     mate.button = 0;
                     // Never Start (0x1000): it would pause.
-                    if (director.coop_mode == 2 && next() % 4 == 0) {
+                    if (director.coop_mode >= 2 && next() % 4 == 0) {
                         mate.button |= 0x8000;
                     }
-                    if (director.coop_mode == 2 && next() % 8 == 0) {
+                    if (director.coop_mode >= 2 && next() % 8 == 0) {
                         mate.button |= 0x4000;
+                    }
+                    if (director.coop_mode == 3 && next() % 6 == 0) {
+                        mate.button |= static_cast<uint16_t>(1u << (next() % 4)); // a C-button
                     }
                 }
                 mate.hold--;
