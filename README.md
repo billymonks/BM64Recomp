@@ -98,6 +98,8 @@ Yes, if you place a file named `portable.txt` in the same folder as the executab
 ## Building
 Building instructions on how to build this project can be found in the [BUILDING.md](BUILDING.md) file.
 
+Development notes (testing, debugging, the online play plan) are in [docs/development-notes.md](docs/development-notes.md).
+
 ## Libraries Used and Projects Referenced
 * [RT64](https://github.com/rt64/rt64) for the project's rendering engine
 * [RmlUi](https://github.com/mikke89/RmlUi) for building the menus and launcher

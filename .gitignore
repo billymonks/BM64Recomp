@@ -63,6 +63,9 @@ rt64.log
 runs/
 *.bm64rec
 /*.csv
+/*_log.txt
+/*_err.txt
+*.dmp
 
 node_modules/
 
