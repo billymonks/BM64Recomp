@@ -761,6 +761,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
 }
 
 void deinit_hook() {
+    recompui::forget_debug_overlay();
     recompui::destroy_all_contexts();
 
     std::lock_guard lock {ui_state_mutex};

@@ -141,6 +141,10 @@ struct PairOptions {
     int hold_from = 0;
     int hold_until = 0;
     uint64_t min_confirmed = 8;
+    // This peer doesn't poll before late_frame, as if its game were still booting after the
+    // handshake. -1 starts both at once.
+    int late_peer = -1;
+    int late_frame = 0;
 };
 
 bool run_pair(const PairOptions& opt, const char* name) {
@@ -177,7 +181,11 @@ bool run_pair(const PairOptions& opt, const char* name) {
 
     for (int frame = 0; frame < opt.frames; frame++) {
         world.time++;
+        bool booting = frame < opt.late_frame;
         for (int p = 0; p < 2; p++) {
+            if (booting && p == opt.late_peer) {
+                continue;
+            }
             bool sampled = false;
             bool stepped = false;
             for (int spins = 0; spins < 64 && !sampled; spins++) {
@@ -211,7 +219,7 @@ bool run_pair(const PairOptions& opt, const char* name) {
             }
             // Time sync may pause a peer for a few frames. A held peer, and anyone waiting on it, may
             // pause for the whole hold.
-            bool holding = world.time >= world.hold_from && world.time < world.hold_until;
+            bool holding = (world.time >= world.hold_from && world.time < world.hold_until) || booting;
             peers[p].idle = (stepped || sampled || holding) ? 0 : peers[p].idle + 1;
             if (peers[p].idle > 16) {
                 std::fprintf(stderr, "%s: peer %d stalled out at frame %d\n", name, p, frame);
@@ -220,6 +228,16 @@ bool run_pair(const PairOptions& opt, const char* name) {
         }
     }
 
+    for (int p = 0; p < 2; p++) {
+        if (peers[p].session->ended()) {
+            std::fprintf(stderr, "%s: peer %d ended: %s\n", name, p, peers[p].session->end_reason());
+            return false;
+        }
+        if (peers[p].session->left(1 - p)) {
+            std::fprintf(stderr, "%s: peer %d handed player %d to the AI\n", name, p, 1 - p);
+            return false;
+        }
+    }
     uint64_t confirmed = a.confirmed_tick() < b.confirmed_tick() ? a.confirmed_tick() : b.confirmed_tick();
     if (confirmed < opt.min_confirmed || peers[0].fake.at(confirmed) != peers[1].fake.at(confirmed)) {
         std::fprintf(stderr, "%s: confirmed state differs or stopped short at %llu (%016llx %016llx) steps %llu/%llu rollbacks %d/%d\n",
@@ -760,6 +778,24 @@ int main() {
     silence.hold_until = 140;
     silence.min_confirmed = 120;
     if (!run_pair(silence, "silence")) {
+        failed++;
+    }
+    // The host's game takes eight seconds (500 frames of 16 ms) to reach its first tick after the
+    // handshake, longer than silence_ms + leave_decide_ms. The guest must wait for it, not end.
+    PairOptions late_host;
+    late_host.frames = 700;
+    late_host.input_delay = 2;
+    late_host.max_frame_advantage = 3;
+    late_host.late_peer = 0;
+    late_host.late_frame = 500;
+    late_host.min_confirmed = 150;
+    if (!run_pair(late_host, "late host start")) {
+        failed++;
+    }
+    // The same with the guest booting late: the host must not hand the guest to the AI.
+    PairOptions late_guest = late_host;
+    late_guest.late_peer = 1;
+    if (!run_pair(late_guest, "late guest start")) {
         failed++;
     }
     if (!run_barrier()) {

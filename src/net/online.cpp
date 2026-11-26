@@ -28,7 +28,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 #endif
 
 
@@ -89,6 +93,13 @@ public:
             int from_len = sizeof(from);
             int n = recvfrom(sock, reinterpret_cast<char*>(buf), sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &from_len);
             if (n <= 0) {
+                // A datagram too big for a session packet (a handshake save chunk the host is still
+                // resending) or a stale port-unreachable report: skip it and keep reading. Stopping
+                // there left the rest of the queue for later polls.
+                int err = n < 0 ? WSAGetLastError() : 0;
+                if (err == WSAEMSGSIZE || err == WSAECONNRESET) {
+                    continue;
+                }
                 break;
             }
             Held item;
@@ -129,6 +140,9 @@ struct Runtime {
     int player = 0;
     int players = 1;
     bool leave_logged[bm64::rollback::kMaxPlayers]{};
+    bool heard_logged[bm64::rollback::kMaxPlayers]{};
+    bool first_frame_logged = false;
+    std::chrono::steady_clock::time_point handshake_done{};
     bool launch_set = false;
     bool launch_host = true;
 };
@@ -229,6 +243,12 @@ bool wait_packet(UdpLink& link, std::vector<uint8_t>& out, int timeout_ms) {
         if (n > 0) {
             out.assign(buf, buf + n);
             return true;
+        }
+        // Only sleep when the queue is empty. A port-unreachable report (the peer's port was not
+        // open yet) is an error per datagram, and sleeping on each one delayed the handshake by
+        // seconds after the guest had already started its session.
+        if (n < 0 && WSAGetLastError() != WSAEWOULDBLOCK) {
+            continue;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -349,6 +369,13 @@ void handshake() {
     }
     u_long nonblock = 1;
     ioctlsocket(link->sock, FIONBIO, &nonblock);
+    // Windows reports an ICMP port-unreachable for an earlier send as WSAECONNRESET on a later
+    // recvfrom. The host sends its hello and save chunks before the guest has bound its port, and
+    // draining those errors kept the host in the handshake for about 9 s after the guest had
+    // finished (loopback, 2026-11-25). Turn the reports off.
+    BOOL report_reset = FALSE;
+    DWORD returned = 0;
+    WSAIoctl(link->sock, SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0, &returned, nullptr, nullptr);
     int rcvbuf = 256 * 1024;
     setsockopt(link->sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
     link->peers = std::move(peer_addrs);
@@ -538,6 +565,7 @@ void handshake() {
     rt().link = std::move(link);
     rt().player = player;
     rt().players = players;
+    rt().handshake_done = std::chrono::steady_clock::now();
     rt().on = true;
 }
 
@@ -546,9 +574,25 @@ int begin_frame(uint8_t* rdram) {
     if (!r.session) {
         return 1;
     }
-    // Longer than noticing a silent player and the host deciding their leave.
-    auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    auto ms_since_handshake = [&]() {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - r.handshake_done).count());
+    };
+    if (!r.first_frame_logged) {
+        r.first_frame_logged = true;
+        std::printf("[bm64 net] First frame %lld ms after the handshake\n", ms_since_handshake());
+    }
+    // Longer than noticing a silent player and the host deciding their leave. Before every peer
+    // has been heard, longer than the startup allowance, since the other game may still be booting.
+    auto give_up = std::chrono::steady_clock::now() +
+        std::chrono::seconds(r.session->all_peers_seen() ? 20 : 40);
     while (std::chrono::steady_clock::now() < give_up) {
+        for (int p = 0; p < r.players; p++) {
+            if (p != r.player && !r.heard_logged[p] && r.session->peer_seen(p)) {
+                r.heard_logged[p] = true;
+                std::printf("[bm64 net] First packet from player %d, %lld ms after the handshake\n", p, ms_since_handshake());
+            }
+        }
         if (r.session->ended()) {
             std::fprintf(stderr, "[bm64 net] %s\n", r.session->end_reason());
             std::exit(1);

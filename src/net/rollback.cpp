@@ -327,7 +327,8 @@ void Session::update_leaves() {
             }
             continue;
         }
-        bool quiet = now >= heard_ms_[player] + static_cast<uint64_t>(config_.silence_ms);
+        int limit = peer_seen_[player] ? config_.silence_ms : config_.startup_silence_ms;
+        bool quiet = now >= heard_ms_[player] + static_cast<uint64_t>(limit);
         if (quiet && !silent_[player]) {
             silent_[player] = true;
             silent_since_ms_[player] = now;
@@ -405,6 +406,15 @@ uint64_t Session::ticks_since_peer(int player) const {
         return 0;
     }
     return simulated_ - peer_heard_[player];
+}
+
+bool Session::all_peers_seen() const {
+    for (int player = 0; player < config_.player_count; player++) {
+        if (remaining(player) && !peer_seen_[player]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 uint64_t Session::slowest_peer() const {

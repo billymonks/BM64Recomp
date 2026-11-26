@@ -59,6 +59,9 @@ struct Config {
     std::function<uint64_t()> clock_ms;
     // A peer that hears nothing from a player for this long reports them silent.
     int silence_ms = 3000;
+    // The same, before that player's first session packet. After the handshake each game still
+    // boots on its own, and one window can take several seconds longer than the other.
+    int startup_silence_ms = 30000;
     // The host decides a leave once every remaining peer reported it, or after this long.
     int leave_decide_ms = 2000;
 };
@@ -114,6 +117,10 @@ public:
     int barrier_waits() const { return barrier_waits_; }
     // Ticks since a packet from this remote player. 0 if they have not been heard yet.
     uint64_t ticks_since_peer(int player) const;
+    // A session packet from this remote player has arrived.
+    bool peer_seen(int player) const { return player >= 0 && player < kMaxPlayers && peer_seen_[player]; }
+    // Every remaining remote player has been heard at least once.
+    bool all_peers_seen() const;
     // From leave_tick(player) on, that player's input is known and has err kLeftErr.
     bool left(int player) const { return player >= 0 && player < kMaxPlayers && left_[player]; }
     uint64_t leave_tick(int player) const { return left(player) ? leave_tick_[player] : 0; }

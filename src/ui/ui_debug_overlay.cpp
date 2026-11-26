@@ -54,7 +54,18 @@ void recompui::init_debug_overlay() {
     printf("[bm64 debug] Debug overlay created (document %p)\n", static_cast<void*>(context.get_document()));
 }
 
+// Closing the window destroys every UI context (deinit_hook). The overlay kept its id, and the
+// next use of it (a draw report, F6, a line update from the game thread) stopped the game with
+// "Attempted to get the document of an invalid UI context".
+void recompui::forget_debug_overlay() {
+    std::lock_guard lock{ overlay.mutex };
+    overlay.context = ContextId::null();
+    overlay.lines.clear();
+    overlay.shown_text.clear();
+}
+
 void recompui::set_debug_overlay_shown(bool shown) {
+    std::lock_guard lock{ overlay.mutex };
     if (overlay.context == ContextId::null()) {
         printf("[bm64 debug] Debug overlay not created yet; can't %s it\n", shown ? "show" : "hide");
         return;
@@ -91,7 +102,9 @@ void recompui::set_debug_overlay_lines(const std::vector<std::string>& lines) {
 // Called by the UI draw hook after the RmlUi context has rendered. Logs evidence that the overlay is actually drawn:
 // its visibility, whether it's the frontmost visible document, the panel's laid-out box and its first line of text.
 void recompui::note_debug_overlay_drawn(Rml::Context* context) {
-    if (overlay.context == ContextId::null()) {
+    // Only a log. Skip a frame rather than wait on a line update from the game thread.
+    std::unique_lock lock{ overlay.mutex, std::try_to_lock };
+    if (!lock.owns_lock() || overlay.context == ContextId::null()) {
         return;
     }
     Rml::ElementDocument* doc = overlay.context.get_document();

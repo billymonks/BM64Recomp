@@ -350,6 +350,13 @@ void stop_real(int real) {
     }
     recomp_context ctx{};
     ctx.r4 = static_cast<gpr>(real);
+    // func_80266930 opens a 0x40-byte frame and calls into the audio library, so it needs a stack.
+    // With sp 0 its first store went outside RDRAM: a rollback that dropped a real sound (the
+    // guest's random stick moving a menu cursor) crashed the game (loopback, 2026-11-26). The
+    // scratch stack is above the co-op state, below the recomp heap at 0x81000000, and is neither
+    // hashed nor snapshotted.
+    constexpr uint32_t kHostCallStackTop = 0x80FF0000u;
+    ctx.r29 = static_cast<gpr>(static_cast<int32_t>(kHostCallStackTop));
     ctx.f_odd = &ctx.f0.u32h;
     fn(e.rdram, &ctx);
 }
@@ -759,6 +766,29 @@ int begin_step(uint8_t* rdram) {
     else if (e.phase == Phase::Record || e.phase == Phase::Compare) {
         spec = true;
         render = 0;
+    }
+
+    // BM64_TEST_NORENDER=N: every Nth step runs the way an intermediate online resim does
+    // (no frame handed to the render thread, no lookAt write), with nothing restored. The game
+    // state must come out the same as a normal replay; a difference is a render-dependent write
+    // that would desync a peer that resimulated against one that did not.
+    static const int norender_every = [] {
+        const char* v = std::getenv("BM64_TEST_NORENDER");
+        int n = v ? std::atoi(v) : 0;
+        if (n > 0) {
+            std::printf("[bm64 state] BM64_TEST_NORENDER: every %d steps unrendered\n", n);
+        }
+        return n;
+    }();
+    // BM64_TEST_SPECULATIVE also marks those steps speculative, as an intermediate resim is (no real
+    // sound starts), so sound-dependent game state shows up as well.
+    static const bool norender_spec = std::getenv("BM64_TEST_SPECULATIVE") != nullptr;
+    if (norender_every > 0 && render != 0 && !bm64::online::active() && e.phase == Phase::Idle && !e.synctest &&
+        bm64::debug::tick() % static_cast<uint64_t>(norender_every) == static_cast<uint64_t>(norender_every - 1)) {
+        render = 0;
+        if (norender_spec) {
+            spec = true;
+        }
     }
 
     // Only the first step of a window. Later forward steps must keep this snapshot.

@@ -95,6 +95,8 @@ namespace recompui {
     void set_debug_overlay_shown(bool shown);
     void set_debug_overlay_lines(const std::vector<std::string>& lines);
     void note_debug_overlay_drawn(Rml::Context* context);
+    // Called before the UI destroys every context, so the overlay stops using its own.
+    void forget_debug_overlay();
     void open_choice_prompt(
         const std::string& header_text,
         const std::string& content_text,
