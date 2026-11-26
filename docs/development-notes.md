@@ -24,7 +24,7 @@ Practical notes for building, testing and debugging this port. Game facts are in
 ## Co-op state
 
 - Co-op keeps its own state in RDRAM from `0x80F00000`: the player array (8 slots, stride `0xC8`, `controlType` at `+0x24`, object pointer at `+0x28`), then movement, HUD copies, process tables, category overrides, per-player camera blocks, rules, the heap high-water mark and camera locals. The layout and its end (`kStateEnd`) are in `include/bm64_coop.h`; that header is the source of truth.
-- That range is inside snapshots and hashed as the `slots` range. Every dump also writes a `<name>.slots.bin` (`0x2000` bytes from `0x80F00000`, big-endian).
+- That range is inside snapshots and hashed as the `slots` range. Every dump also writes a `<name>.slots.bin` (`0x2200` bytes from `0x80F00000`, big-endian; `0x2000` before 2026-11-25, when the parked-leader block `kPauseBase` and the screen-grab table `kRenderOutBase` were added from `0x80F02000`).
 - The game heap may grow to `0x80500000`. Snapshots and hashes cover it up to the high-water mark.
 
 ## Running tests
@@ -35,6 +35,10 @@ Practical notes for building, testing and debugging this port. Game facts are in
 - `tools/run-director.ps1 -Scenes <hex,...> -Out <dir>` records unattended director runs (scene warps with scripted input).
 - `tools/run-synctest-scenes.ps1 -Scenes "28,31,38,48,58" -Out <dir> [-Secs 40] [-Exe <path>]` records each scene and runs SyncTest at depths 1 and 12. For co-op set `BM64_COOP_LOCAL=2` and a teammate script (`BM64_DIRECTOR_COOP=move|buttons|camera`). Always pin the seed (`BM64_SEED=431DE7EA` in the recorded runs); without it each recording picks its own and a bug can pass by luck. Scene `0x31` is rival map 4.10.
 - `tools/run-synctest-coverage.ps1` does the same over many scenes with `-Depths`.
+- `tools/re/swap_ports.py in.bm64rec out.bm64rec <from_frame>` swaps two players' pads from a frame on (for example to replay a co-op run with the other player walking).
+- Crashes: the Application event log gives the fault offset; `toolchain\LLVM-19.1.3-Windows-X64in\llvm-symbolizer.exe --obj=build\BM64Recompiled.exe --relative-address 0x<offset>` maps it to a function and line (the `dbghelp` route did not resolve symbols on 2026-11-26).
+- `tools/run-loopback.ps1 -Out <dir> [-Players 2..4] [-Ticks 7200] [-Jitter ms] [-Loss %] [-HostMenu presses -HostPulse]` runs an unattended online session on this PC (every guest pad scripted; the host's pad idle, so it runs the title and the attract demo, or scripted with `-HostMenu "560:1000,820:1000,960:0:0:-80,1020:1000" -HostPulse` to go into a Battle) and compares each guest's hash log with the host's tick by tick. Pass: no `BM64 DESYNC` line and `identical` for every guest.
+- SyncTest runs both of its passes unrendered, so it cannot see state that depends on whether a step was rendered. Online, a peer that resimulated a tick ran it unrendered and the other peer ran it rendered. Check that with two replays, both with `BM64_HASH_SKIP_LOOKAT=1` and the second also with `BM64_TEST_NORENDER=4`, and `python tools/re/compare_hashes.py a/hashes.csv b/hashes.csv`: every range should match.
 - A SyncTest failure prints `BM64 SYNCTEST FAIL`. Never fix one by removing a hash range without proof that the bytes are not game state; known build-to-build differences (idle-process stack leftovers, a stored patch-code pointer) are documented in `online-play-plan.md`.
 - Compare dumps with `python tools/re/dumpdiff.py a.bin b.bin --ranges all`, then map addresses with `tools/re/find.py`.
 - A manual run should redirect output with `Start-Process ... -RedirectStandardOutput log.txt -RedirectStandardError err.txt`. PowerShell's `>` redirection left the log empty in practice.
@@ -45,10 +49,10 @@ Read in `src/` (check there for exact semantics):
 
 - Session and input: `BM64_AUTOSTART`, `BM64_RECORD`, `BM64_REPLAY`, `BM64_EXIT_TICK`, `BM64_EXIT_ON_REPLAY_END`, `BM64_SEED`, `BM64_ROM`, `BM64_DISABLE_CHEATS`, `BM64_DEBUG_OVERLAY`.
 - Save sandbox: `BM64_SANDBOX`, `BM64_SANDBOX_IMAGE`, `BM64_SANDBOX_EXPORT`, `BM64_SAVETEST`, `BM64_SAVETEST_START`.
-- Hashing and dumps: `BM64_HASH_LOG`, `BM64_HASH_RANGES`, `BM64_HASH_DEAD_STACKS`, `BM64_DUMP_DIR`, `BM64_DUMP_TICKS`, `BM64_SYNCTEST`, `BM64_SYNCTEST_DUMP`, `BM64_INJECT_DESYNC`, `BM64_DESYNC_DIR`, `BM64_HEAP_END`, `BM64_HEAP_MARK`, `BM64_SLOT_PROBE`.
+- Hashing and dumps: `BM64_HASH_LOG`, `BM64_HASH_RANGES`, `BM64_HASH_DEAD_STACKS`, `BM64_HASH_SKIP_LOOKAT` (hash a replay the way a session does), `BM64_TEST_NORENDER=N` (every Nth replayed step runs unrendered, like an online resim), `BM64_TEST_SPECULATIVE` (those steps also start no real sounds), `BM64_LOG_SPAWNS` (log `g_spawnEnemyFromAllocation` calls), `BM64_DUMP_DIR`, `BM64_DUMP_TICKS`, `BM64_SYNCTEST`, `BM64_SYNCTEST_DUMP`, `BM64_INJECT_DESYNC`, `BM64_DESYNC_DIR`, `BM64_HEAP_END`, `BM64_HEAP_MARK`, `BM64_SLOT_PROBE`.
 - Director: `BM64_DIRECTOR`, `BM64_DIRECTOR_BOOT`, `BM64_DIRECTOR_SECS`, `BM64_DIRECTOR_SEED`, `BM64_DIRECTOR_MENU`, `BM64_DIRECTOR_COOP`.
 - Co-op: `BM64_COOP_LOCAL` (number of local players), `BM64_COOP_LIVES`, `BM64_COOP_OVERRIDE`, `BM64_VIEW_PLAYER`, `BM64_COOP_TRACE`, `BM64_CAM_TRACE`, `BM64_CAMERA_BIAS`, `BM64_LOG_MAIN_CALLERS`. F9 cycles which player's camera the window shows; F6 toggles the debug overlay.
-- Network: `BM64_NET` (`host`/`guest`), `BM64_NET_PLAYERS`, `BM64_NET_PLAYER`, `BM64_NET_BIND`, `BM64_NET_PEER`, `BM64_NET_SAMPLE` (`zero`, `script`, `script-buttons`), `BM64_NET_LAG_MS`, `BM64_NET_JITTER_MS`, `BM64_NET_LOSS`, `BM64_NET_DELAY`, `BM64_NET_ROLLBACK`, `BM64_NET_LIVES`, `BM64_TURN_HOST`, `BM64_DISCORD_APP_ID`.
+- Network: `BM64_NET` (`host`/`guest`), `BM64_NET_PLAYERS`, `BM64_NET_PLAYER`, `BM64_NET_BIND`, `BM64_NET_PEER`, `BM64_NET_SAMPLE` (`zero`, `script`, `script-buttons`), `BM64_NET_LAG_MS`, `BM64_NET_JITTER_MS`, `BM64_NET_LOSS`, `BM64_NET_DELAY`, `BM64_NET_ROLLBACK`, `BM64_NET_LIVES`, `BM64_NET_HOST_MENU` / `BM64_NET_HOST_PULSE` (script the host's pad, see `run-loopback.ps1 -HostMenu`), `BM64_TURN_HOST`, `BM64_DISCORD_APP_ID`.
 
 ## Debugging crashes and hangs
 
@@ -62,4 +66,5 @@ Read in `src/` (check there for exact semantics):
 - Director warps to map 9.6 hang right after loading, even single-player; 9.6 needs a real playthrough.
 - One replay crashed once while loading 4.10 and could not be reproduced.
 - Players 5–8 repeat the four Battle colors.
+- Flat objects ("pots and stuff") face the first human's camera when the window shows another player's. See "Billboards" in `online-play-plan.md`.
 - Pending manual checks are listed at the top of "Next work queue" in `online-play-plan.md`.
