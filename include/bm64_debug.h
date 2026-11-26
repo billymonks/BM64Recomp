@@ -77,7 +77,7 @@ namespace bm64::debug {
     // The player array and co-op state, 0x80F00000 up to bm64::coop::kStateEnd, which dump_to does
     // not reach. `slots` points at the host copy of 0x80F00000. Big-endian, like dump_to.
     constexpr uint32_t kSlotDumpBase = 0x80F00000;
-    constexpr uint32_t kSlotDumpBytes = 0x2000;
+    constexpr uint32_t kSlotDumpBytes = 0x2200;
     void dump_slots_to(const uint8_t* slots, const std::filesystem::path& path);
     // End of the malloc heap. The sbrk patch in patches/required_patches.c (BM64_HEAP_END) lets
     // the break grow this far instead of the ROM's 0x80400000.

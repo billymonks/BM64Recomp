@@ -50,7 +50,22 @@ constexpr uint32_t kCamProcOwner = kHeapMark + 0x10;
 // (the rotation copy at sp+0x7C and the C-button halfword at sp+0x8A) for its 0x8000 follow-up.
 constexpr uint32_t kCamLocals = kCamProcOwner + kProcessSlots;
 constexpr uint32_t kCamLocalsSize = 0x10;
-constexpr uint32_t kStateEnd = kCamLocals + kCamCount * kCamLocalsSize;
+// Teammates while the game has parked the leader off the map (a cutscene that shows another area):
+// +0x00 active byte, +0x01 overlay id when it started, +0x04 8 saved slot flag words (+0x10),
+// +0x24 8 last on-map body positions (12 bytes each), +0x84 8 overlay ids of those positions
+// (0 none), +0x8C 8 heart counts when it started.
+constexpr uint32_t kPauseBase = kCamLocals + kCamCount * kCamLocalsSize;
+constexpr uint32_t kPauseBytes = 0xA0;
+// Buffers the game fills from the presented framebuffer (screen grabs for transitions). Their bytes
+// come from the renderer, so they differ between machines and between rendered and resimulated
+// steps; the state hash skips them (bm64::debug). +0x00 next slot, then kRenderOutSlots of
+// { start, end }. Set and cleared by hooks in game code, so it is game state and rolls back.
+constexpr uint32_t kRenderOutBase = kPauseBase + kPauseBytes;
+// The attract demo keeps five alive at once (a full-screen grab from tick 835 to the end, plus 128x128
+// ones); with four slots the fifth pushed out the oldest, whose pixels then reached the hash.
+constexpr int kRenderOutSlots = 16;
+constexpr uint32_t kRenderOutBytes = 0x90;
+constexpr uint32_t kStateEnd = kRenderOutBase + kRenderOutBytes;
 
 int local_player();
 // The session player whose camera is rendered. Host-only: it never touches game memory.

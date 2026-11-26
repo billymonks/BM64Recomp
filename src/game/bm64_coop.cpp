@@ -377,6 +377,160 @@ void settle_parked_checkpoint(uint8_t* rdram) {
     }
 }
 
+int leader_slot(uint8_t* rdram) {
+    int leader = word(rdram, 0x802AC894u);
+    return (leader < 0 || leader >= bm64::coop::kPlayerSlots) ? 0 : leader;
+}
+
+uint32_t slot_base(int slot) {
+    return bm64::coop::kPlayerBase + static_cast<uint32_t>(slot) * bm64::coop::kPlayerStride;
+}
+
+// Moves a bomber's body without touching its spawn point (place_human also rewrites the spawn).
+void move_body(uint8_t* rdram, int slot, float x, float y, float z) {
+    uint32_t body = 0;
+    if (!slot_body(rdram, slot, body)) {
+        return;
+    }
+    store_f32(rdram, body + 0x10, x);
+    store_f32(rdram, body + 0x14, y);
+    store_f32(rdram, body + 0x18, z);
+    uint32_t rec = static_cast<uint32_t>(word(rdram, slot_base(slot) + 0x28));
+    store_f32(rdram, rec + 0x58, x);
+    store_f32(rdram, rec + 0x5C, y);
+    store_f32(rdram, rec + 0x60, z);
+}
+
+// Pause block (bm64::coop::kPauseBase). Only host code reads or writes these bytes.
+uint8_t* pause_bytes(uint8_t* rdram) {
+    return rdram + (bm64::coop::kPauseBase - 0x80000000u);
+}
+constexpr uint32_t kPauseFlags = bm64::coop::kPauseBase + 0x04;
+constexpr uint32_t kPauseLast = bm64::coop::kPauseBase + 0x24;
+constexpr uint32_t kPauseLastOvl = 0x84;
+constexpr uint32_t kPauseHearts = 0x8C;
+
+// Log only: hits absorbed while teammates waited with a parked leader.
+int g_pause_hits = 0;
+
+bool pause_active(uint8_t* rdram) {
+    return pause_bytes(rdram)[0] != 0;
+}
+
+bool human_teammate(uint8_t* rdram, int slot, int leader) {
+    uint32_t body = 0;
+    return slot != leader && word(rdram, slot_base(slot) + 0x24) == 1 && slot_body(rdram, slot, body);
+}
+
+// A cutscene that shows another area (map 4.1's gate after the last orb, which loads 4.2 to show
+// it) parks the leader's body at -10000 and gives the leader's slot flags 0x02010420, which keep
+// it out of play there. A teammate parked beside it without them fell below the kill plane and
+// died on every tick, spending the party's lives. While the leader is parked, every human teammate
+// is parked next to it with the leader's flags and its own hearts. When the leader is back, each
+// returns to where it last stood on that map, or next to the leader if the map changed.
+void pause_with_parked_leader(uint8_t* rdram) {
+    uint8_t* p = pause_bytes(rdram);
+    // While a stage reloads (the way back from that cutscene reloads 4.1) there is no leader and
+    // every body reads (0, 0, 0). The wait goes on until the reloaded stage has its leader again.
+    if (word(rdram, 0x802AC894u) < 0) {
+        return;
+    }
+    int leader = leader_slot(rdram);
+    float lx = 0, ly = 0, lz = 0;
+    bool have = body_pos(rdram, slot_base(leader), lx, ly, lz);
+    bool leader_parked = have && parked(lx);
+    uint8_t overlay = static_cast<uint8_t>(sess().overlay);
+    int32_t leader_flags = word(rdram, slot_base(leader) + 0x10);
+    if (leader_parked) {
+        if (!p[0]) {
+            p[0] = 1;
+            p[1] = overlay;
+            for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+                set_word(rdram, kPauseFlags + static_cast<uint32_t>(i) * 4, word(rdram, slot_base(i) + 0x10));
+                p[kPauseHearts + i] = static_cast<uint8_t>(std::clamp(word(rdram, slot_base(i) + 0x14), 0, 255));
+            }
+            std::printf("[bm64 coop] Leader parked off the map (tick %u); teammates wait with it\n",
+                static_cast<unsigned>(bm64::debug::tick()));
+        }
+        for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+            if (!human_teammate(rdram, i, leader)) {
+                continue;
+            }
+            set_word(rdram, slot_base(i) + 0x10, leader_flags);
+            if (p[kPauseHearts + i] > 0) {
+                set_word(rdram, slot_base(i) + 0x14, p[kPauseHearts + i]);
+            }
+            // The parked point is below the stage's kill plane (D_802AFC5C, func_8026E8B8). The leader
+            // is left alone there, but a teammate's body is flagged by func_80232FF8 and takes a
+            // kind-3 hit (animation and sound) on every tick. Hold it above the plane, with no fall
+            // speed and no latched pit flag.
+            float kill = f32_at(rdram, 0x802AFC5Cu);
+            float wy = std::max(ly, kill + 500.0f);
+            move_body(rdram, i, lx + kPartySpacing * static_cast<float>(party_rank(rdram, i)), wy, lz);
+            uint32_t obj = static_cast<uint32_t>(word(rdram, slot_base(i) + 0x28));
+            store_f32(rdram, obj + 0x6C, 0.0f);
+            for (uint32_t off : { 0x10u, 0x14u }) {
+                set_word(rdram, obj + off, static_cast<int32_t>(static_cast<uint32_t>(word(rdram, obj + off)) & ~0x40000000u));
+            }
+        }
+        return;
+    }
+    if (p[0]) {
+        // The overlay id can change while the leader is parked (the cutscene loads 4.2, the way
+        // back reloads 4.1), so only the map of each teammate's last spot is compared.
+        bool same_map = false;
+        for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+            if (!human_teammate(rdram, i, leader)) {
+                continue;
+            }
+            set_word(rdram, slot_base(i) + 0x10, word(rdram, kPauseFlags + static_cast<uint32_t>(i) * 4));
+            uint32_t last = kPauseLast + static_cast<uint32_t>(i) * 12;
+            float tx = lx + kPartySpacing * static_cast<float>(party_rank(rdram, i)), ty = ly, tz = lz;
+            if (p[kPauseLastOvl + i] == overlay && overlay != 0) {
+                same_map = true;
+                tx = f32_at(rdram, last);
+                ty = f32_at(rdram, last + 4);
+                tz = f32_at(rdram, last + 8);
+            }
+            if (have) {
+                move_body(rdram, i, tx, ty, tz);
+                // The game puts every bomber back on its slot's spawn point over the next ticks
+                // (map 4.1 after the gate cutscene), which for a teammate was the stage start.
+                store_f32(rdram, slot_base(i) + 0x00, tx);
+                store_f32(rdram, slot_base(i) + 0x04, ty);
+                store_f32(rdram, slot_base(i) + 0x08, tz);
+            }
+        }
+        // The leader too: after a cutscene on the same map (map 4.1's orb lights) the game puts the
+        // leader where it expects the main player to have stood, the light a teammate may have
+        // triggered. Back to its own spot; when the leader triggered it, that is the same place.
+        if (have && p[kPauseLastOvl + leader] == overlay && overlay != 0) {
+            uint32_t last = kPauseLast + static_cast<uint32_t>(leader) * 12;
+            float tx = f32_at(rdram, last), ty = f32_at(rdram, last + 4), tz = f32_at(rdram, last + 8);
+            move_body(rdram, leader, tx, ty, tz);
+            store_f32(rdram, slot_base(leader) + 0x00, tx);
+            store_f32(rdram, slot_base(leader) + 0x04, ty);
+            store_f32(rdram, slot_base(leader) + 0x08, tz);
+        }
+        p[0] = 0;
+        std::printf("[bm64 coop] Leader back on the map (tick %u); teammates %s; %d hits on waiting teammates ignored\n",
+            static_cast<unsigned>(bm64::debug::tick()), same_map ? "return to their spots" : "join the leader", g_pause_hits);
+        g_pause_hits = 0;
+    }
+    for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
+        float x = 0, y = 0, z = 0;
+        // Every human, the leader included.
+        if (!human_teammate(rdram, i, -1) || !body_pos(rdram, slot_base(i), x, y, z) || parked(x)) {
+            continue;
+        }
+        uint32_t last = kPauseLast + static_cast<uint32_t>(i) * 12;
+        store_f32(rdram, last, x);
+        store_f32(rdram, last + 4, y);
+        store_f32(rdram, last + 8, z);
+        p[kPauseLastOvl + i] = overlay;
+    }
+}
+
 uint32_t g_cutscene_func = 0;
 
 bool cutscene_running(uint8_t* rdram) {
@@ -617,9 +771,17 @@ void apply_rules(uint8_t* rdram) {
         }
         settle_parked_checkpoint(rdram);
         note_checkpoint_hearts(rdram);
+        pause_with_parked_leader(rdram);
         apply_cutscene_hide(rdram);
         separate_humans(rdram);
         retarget_rivals(rdram);
+    }
+    else if (s.on) {
+        // Off the story maps (world map, menus) the remembered spots belong to a visit that is
+        // over; entering the same map again must not send teammates back to them.
+        uint8_t* p = pause_bytes(rdram);
+        p[0] = 0;
+        std::memset(p + kPauseLastOvl, 0, bm64::coop::kPlayerSlots);
     }
     static const int trace_every = [] {
         const char* v = std::getenv("BM64_COOP_TRACE");
@@ -712,6 +874,23 @@ extern "C" void bm64_coop_downed(uint8_t* rdram, recomp_context* ctx) {
     if (word(rdram, self + 0x24) != 1) {
         return;
     }
+    // A teammate waiting with a parked leader is out of play. A hit there is not a death and
+    // costs no life; pause_with_parked_leader puts it back beside the leader on the next tick.
+    if (pause_active(rdram) && player != leader_slot(rdram)) {
+        int kept = pause_bytes(rdram)[kPauseHearts + player];
+        int hearts = kept > 0 ? kept : 1;
+        set_word(rdram, self + 0x14, hearts);
+        ctx->r8 = hearts;
+        uint32_t obj = static_cast<uint32_t>(word(rdram, self + 0x28));
+        if ((obj & 0xFF000000u) == 0x80000000u) {
+            set_word(rdram, obj + 0x10, static_cast<int32_t>(static_cast<uint32_t>(word(rdram, obj + 0x10)) & ~0x40000000u));
+        }
+        if (g_pause_hits++ < 4) {
+            std::printf("[bm64 coop] Player %d was hit while waiting with the parked leader (tick %u); no life lost\n",
+                player, static_cast<unsigned>(bm64::debug::tick()));
+        }
+        return;
+    }
     bool rival = rival_map(sess().overlay);
     bool other = false;
     for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
@@ -790,6 +969,12 @@ extern "C" void bm64_coop_snap_party(uint8_t* rdram, recomp_context* ctx) {
     float z = f32_at(rdram, base + 0x08);
     float angle = f32_at(rdram, base + 0x0C);
     write_checkpoint(rdram, x, y, z);
+    // Coming back from a cutscene in another area, the game snaps the leader to its spawn (the
+    // stage start on map 4.1). Teammates waiting with the parked leader are put back where they
+    // stood by pause_with_parked_leader instead of being pulled to that spawn.
+    if (pause_active(rdram)) {
+        return;
+    }
     int snapped_rank = party_rank(rdram, slot);
     for (int i = 0; i < bm64::coop::kPlayerSlots; i++) {
         if (i == slot) {
@@ -987,8 +1172,29 @@ bool has_camera_block(uint8_t* rdram, int slot) {
 }
 
 int g_broadcasts = 0;
+// BM64_CAM_TRACE: which process entries broadcast camera commands since the last trace line.
+struct BroadcastSource {
+    uint32_t func;
+    int count;
+};
+BroadcastSource g_broadcast_sources[8]{};
 
 constexpr uint32_t kCurrentProcess = 0x802AC344u;
+
+uint32_t process_func(uint8_t* rdram, uint32_t proc);
+
+// Host log only. `partial` is 1 for a command copied component by component (see bm64_camera_command).
+void note_broadcast_source(uint8_t* rdram, int partial) {
+    uint32_t func = process_func(rdram, static_cast<uint32_t>(word(rdram, kCurrentProcess))) | (partial ? 1u : 0u);
+    for (BroadcastSource& src : g_broadcast_sources) {
+        if (src.count == 0 || src.func == func) {
+            src.func = func;
+            src.count++;
+            break;
+        }
+    }
+}
+
 constexpr uint32_t kProcessPool = 0x80063370u;
 constexpr uint32_t kProcessSize = 0x8A0u;
 constexpr uint32_t kCameraController = 0x80235D7Cu;
@@ -1066,6 +1272,12 @@ void trace_camera(uint8_t* rdram) {
             f(b), f(b + 4), f(b + 8), f(b + 0x10), f(b + 0x14), f(b + 0x18),
             f(b + kCamRotation), f(b + kCamRotation + 4), f(b + kCamRotation + 8),
             h(b + 0x10 + 0x4E), h(b + 0x10 + 0x4C));
+    }
+    for (BroadcastSource& src : g_broadcast_sources) {
+        if (src.count > 0) {
+            std::printf(" | bc %08X x%d", src.func, src.count);
+        }
+        src = {};
     }
     std::printf("\n");
 }
@@ -1203,8 +1415,56 @@ extern "C" void bm64_camera_broadcast(uint8_t* rdram) {
     }
     ensure_blocks(rdram);
     g_broadcasts++;
+    note_broadcast_source(rdram, 0);
     for (int i = 0; i < bm64::coop::kCamCount; i++) {
         copy_block(rdram, i, false);
+    }
+}
+
+// Processes whose camera commands run during normal play every tick and must not overwrite
+// the other humans' cameras. func_8025C840 is the rival-fight camera (map 4.10, 2026-11-25
+// trace: 119 broadcasts every 120 ticks): each tick it takes the largest distance between a
+// computer bomber (AI records at 0x800BCFE8, stride 0x128) and its target and sets the rotation
+// to (0, 45, zoom) to fit it. Its look-at comes from the camera controller, which follows each
+// human in their own pass. The scripted-bomber update func_802553D4 also sets the camera, but
+// only for one-off staging (the rival's entrance and defeat) that every human should see.
+bool partial_camera_source(uint32_t func) {
+    return func == 0x8025C840u;
+}
+
+// End of func_80234778 (kind 0: set the rotation at 0x8008F3F8) or func_802346C8 (kind 1: set the
+// eye at 0x8008E648). Each argument (f12, f14, f16) equal to 32768.0 leaves that component alone.
+// During a cutscene, or while the leader is parked, every human sees the scripted camera, so the
+// whole live camera is copied to every block as before. Otherwise (map 4.10's fight script, which
+// calls both every tick) only the components the command wrote are copied, so each human's camera
+// keeps following its own bomber.
+extern "C" void bm64_camera_command(uint8_t* rdram, recomp_context* ctx, int kind) {
+    if (!story(rdram) || camera_multi(rdram)) {
+        return;
+    }
+    int index = process_index(static_cast<uint32_t>(word(rdram, kCurrentProcess)));
+    if (index >= 0 && *process_owner(rdram, index) != 0) {
+        return;
+    }
+    uint32_t source = process_func(rdram, static_cast<uint32_t>(word(rdram, kCurrentProcess)));
+    if (!partial_camera_source(source) || cutscene_running(rdram) || pause_active(rdram)) {
+        bm64_camera_broadcast(rdram);
+        return;
+    }
+    ensure_blocks(rdram);
+    g_broadcasts++;
+    note_broadcast_source(rdram, 1);
+    const float args[3] = { ctx->f12.fl, ctx->f14.fl, ctx->f16.fl };
+    uint32_t live = kind == 0 ? 0x8008F3F8u : 0x8008E648u;
+    uint32_t offset = kind == 0 ? kCamRotation : 0x000u;
+    for (int c = 0; c < 3; c++) {
+        if (args[c] == 32768.0f) {
+            continue;
+        }
+        int32_t value = word(rdram, live + static_cast<uint32_t>(c) * 4);
+        for (int i = 0; i < bm64::coop::kCamCount; i++) {
+            set_word(rdram, block_addr(i) + offset + static_cast<uint32_t>(c) * 4, value);
+        }
     }
 }
 
@@ -1278,4 +1538,147 @@ extern "C" int bm64_camera_rotation(uint8_t* rdram, recomp_context* ctx) {
         }
     }
     return 1;
+}
+
+// func_80232FF8 (objects, mode 1) and func_8027CE10 (items) hide anything farther from the
+// camera's pivot than its arm (scaled, for objects): the pivot is D_8008F3E8 and the arm runs to
+// the eye, swapped when D_8008F404 is 1. Live memory holds the first human's camera, so only that
+// human's surroundings stayed visible and in play; around a teammate, objects had no model and
+// enemies did not start. Just before each function compares, this hands it whichever human's
+// distance and arm put the thing nearest, relative to the arm, so it stays shown for anyone close.
+// `arm`, `dist` and `pos` are stack offsets of the arm length, the distance and the object
+// position the function computed from the live camera.
+extern "C" void bm64_coop_range_test(uint8_t* rdram, recomp_context* ctx, int arm_off, int dist_off, int pos_off) {
+    if (!story(rdram) || meta(rdram, 4) == 0 || meta(rdram, 2) != 0) {
+        return;
+    }
+    int count = meta(rdram, 0);
+    if (count < 2) {
+        return;
+    }
+    auto stack_f = [&](int off) {
+        return std::bit_cast<float>(static_cast<uint32_t>(MEM_W(off, ctx->r29)));
+    };
+    float arm = stack_f(arm_off);
+    float dist = stack_f(dist_off);
+    float px = stack_f(pos_off);
+    float py = stack_f(pos_off + 4);
+    float pz = stack_f(pos_off + 8);
+    if (!(arm > 0.0f)) {
+        return;
+    }
+    float best_ratio = dist / arm;
+    float best_arm = arm;
+    float best_dist = dist;
+    int primary = ram(rdram, bm64::coop::kCamMeta)[8];
+    for (int i = 0; i < count && i < 8; i++) {
+        int slot = ram(rdram, bm64::coop::kCamMeta)[8 + i];
+        if (slot == primary || slot >= bm64::coop::kCamCount) {
+            continue;
+        }
+        uint32_t b = block_addr(slot);
+        float ex = f32_at(rdram, b + 0x00), ey = f32_at(rdram, b + 0x04), ez = f32_at(rdram, b + 0x08);
+        // D_8008F3E8 is the core piece (block + 0x10) + 0x10; D_8008F404 is core + 0x2C.
+        float cx = f32_at(rdram, b + 0x20), cy = f32_at(rdram, b + 0x24), cz = f32_at(rdram, b + 0x28);
+        if (word(rdram, b + 0x10 + 0x2C) == 1) {
+            std::swap(ex, cx);
+            std::swap(ey, cy);
+            std::swap(ez, cz);
+        }
+        float ax = cx - ex, ay = cy - ey, az = cz - ez;
+        float h_arm = std::sqrt(ax * ax + ay * ay + az * az);
+        if (!(h_arm > 0.0f)) {
+            continue;
+        }
+        float dx = px - cx, dy = py - cy, dz = pz - cz;
+        float h_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        float ratio = h_dist / h_arm;
+        if (ratio < best_ratio) {
+            best_ratio = ratio;
+            best_arm = h_arm;
+            best_dist = h_dist;
+        }
+    }
+    if (best_arm != arm || best_dist != dist) {
+        MEM_W(arm_off, ctx->r29) = static_cast<int32_t>(std::bit_cast<uint32_t>(best_arm));
+        MEM_W(dist_off, ctx->r29) = static_cast<int32_t>(std::bit_cast<uint32_t>(best_dist));
+    }
+}
+
+// The draw pass (func_802290CC) asks func_80237478 for the camera yaw into D_802A5468/D_802A546C,
+// and func_802289C0 turns every model node with flag 0x2000 to it: flat objects such as map 4.1's
+// pots. Live memory holds the first human's camera, so they faced that human's camera whichever
+// camera the window showed. bm64_billboard_view(rdram, 1) swaps the viewed player's eye and core
+// pieces in so the hook can ask again, and (rdram, 0) puts the first human's back. Both words are
+// render output: a session leaves them out of the state hash.
+namespace {
+uint8_t g_billboard_saved[0x10 + 0x60];
+bool g_billboard_swapped = false;
+}
+
+extern "C" int bm64_billboard_view(uint8_t* rdram, int enter) {
+    if (!enter) {
+        if (g_billboard_swapped) {
+            std::memcpy(ram(rdram, kCamPieces[0].live), g_billboard_saved, kCamPieces[0].size);
+            std::memcpy(ram(rdram, kCamPieces[1].live), g_billboard_saved + kCamPieces[0].size, kCamPieces[1].size);
+            g_billboard_swapped = false;
+        }
+        return 0;
+    }
+    int local = slot_of_player(rdram, bm64::coop::view_player());
+    int primary = ram(rdram, bm64::coop::kCamMeta)[8];
+    if (local == primary || !has_camera_block(rdram, local)) {
+        return 0;
+    }
+    uint32_t block = block_addr(local);
+    std::memcpy(g_billboard_saved, ram(rdram, kCamPieces[0].live), kCamPieces[0].size);
+    std::memcpy(g_billboard_saved + kCamPieces[0].size, ram(rdram, kCamPieces[1].live), kCamPieces[1].size);
+    std::memcpy(ram(rdram, kCamPieces[0].live), ram(rdram, block + kCamPieces[0].offset), kCamPieces[0].size);
+    std::memcpy(ram(rdram, kCamPieces[1].live), ram(rdram, block + kCamPieces[1].offset), kCamPieces[1].size);
+    g_billboard_swapped = true;
+    return 1;
+}
+
+// Camera mode commands from scripts: func_802362B8(mask) clears flag bits of D_8008F428,
+// func_802362D4(mask) sets them, func_802350F8(m) sets D_8008F404 to 0 or 1. They changed only the
+// live camera, so another human's block kept old modes. Map 4.10's rival entrance clears the follow
+// bit 0x10 and sets it again later; the second human's block kept it clear and their camera stopped
+// following them for the whole fight. Called at each command's entry with its argument.
+extern "C" void bm64_camera_mode_command(uint8_t* rdram, recomp_context* ctx, int kind) {
+    if (!story(rdram) || camera_multi(rdram) || meta(rdram, 4) == 0) {
+        return;
+    }
+    int index = process_index(static_cast<uint32_t>(word(rdram, kCurrentProcess)));
+    if (index >= 0 && *process_owner(rdram, index) != 0) {
+        return;
+    }
+    uint32_t arg = static_cast<uint32_t>(ctx->r4);
+    for (int i = 0; i < bm64::coop::kCamCount; i++) {
+        uint32_t b = block_addr(i);
+        if (kind == 0) {
+            set_word(rdram, b + 0x60, static_cast<int32_t>(static_cast<uint32_t>(word(rdram, b + 0x60)) & ~arg));
+        }
+        else if (kind == 1) {
+            set_word(rdram, b + 0x60, static_cast<int32_t>(static_cast<uint32_t>(word(rdram, b + 0x60)) | arg));
+        }
+        else if (kind == 2 && arg <= 1) {
+            set_word(rdram, b + 0x3C, static_cast<int32_t>(arg));
+        }
+    }
+}
+
+// BM64_LOG_SPAWNS: log each g_spawnEnemyFromAllocation call (tick, running process, arguments, the
+// two first humans' positions). Log only; used to find which spawn checks only look at the leader.
+extern "C" void bm64_log_spawn(uint8_t* rdram, recomp_context* ctx) {
+    static const bool on = std::getenv("BM64_LOG_SPAWNS") != nullptr;
+    if (!on) {
+        return;
+    }
+    uint32_t func = process_func(rdram, static_cast<uint32_t>(word(rdram, kCurrentProcess)));
+    float x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+    body_pos(rdram, slot_base(0), x0, y0, z0);
+    body_pos(rdram, slot_base(1), x1, y1, z1);
+    std::printf("[bm64 spawn] tick %u process %08X a0 %08X a1 %.0f a2 %.0f a3 %.0f | p0 (%.0f,%.0f,%.0f) p1 (%.0f,%.0f,%.0f)\n",
+        static_cast<unsigned>(bm64::debug::tick()), func, static_cast<uint32_t>(ctx->r4), ctx->f12.fl, ctx->f14.fl,
+        std::bit_cast<float>(static_cast<uint32_t>(ctx->r6)), x0, y0, z0, x1, y1, z1);
 }

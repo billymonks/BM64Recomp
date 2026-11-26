@@ -41,6 +41,12 @@ text = """
     bm64_sound_enter((int)ctx->r4, 0, 0, 0, 0);
     if (bm64_sound_should_skip()) {
         ctx->r2 = (int64_t)bm64_sound_leave(-1);
+        // The played path zeroes the dead stack below the caller on its way out (the scrub
+        // below); a skipped call must leave the same zeros, or a speculative resim differs.
+        extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+        // The played path spills its arguments into the caller's home slots (o32); do the same.
+        MEM_W(0x0, ctx->r29) = (int32_t)ctx->r4;
+        bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
         return;
     }
 """
@@ -65,6 +71,15 @@ text = """
     bm64_sound_enter((int)ctx->r4, 1, (int)ctx->r5, (int)ctx->r6, (int)ctx->r7);
     if (bm64_sound_should_skip()) {
         ctx->r2 = (int64_t)bm64_sound_leave(-1);
+        // The played path zeroes the dead stack below the caller on its way out (the scrub
+        // below); a skipped call must leave the same zeros, or a speculative resim differs.
+        extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+        // The played path spills its arguments into the caller's home slots (o32); do the same.
+        MEM_W(0x0, ctx->r29) = (int32_t)ctx->r4;
+        MEM_W(0x4, ctx->r29) = (int32_t)ctx->r5;
+        MEM_W(0x8, ctx->r29) = (int32_t)ctx->r6;
+        MEM_W(0xC, ctx->r29) = (int32_t)ctx->r7;
+        bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
         return;
     }
 """
@@ -344928,8 +344943,8 @@ text = """
 func = "func_80234778"
 before_vram = 0x80234850
 text = """
-    extern void bm64_camera_broadcast(uint8_t* rdram);
-    bm64_camera_broadcast(rdram);
+    extern void bm64_camera_command(uint8_t* rdram, recomp_context* ctx, int kind);
+    bm64_camera_command(rdram, ctx, 0);
 """
 
 
@@ -344937,8 +344952,8 @@ text = """
 func = "func_802346C8"
 before_vram = 0x80234710
 text = """
-    extern void bm64_camera_broadcast(uint8_t* rdram);
-    bm64_camera_broadcast(rdram);
+    extern void bm64_camera_command(uint8_t* rdram, recomp_context* ctx, int kind);
+    bm64_camera_command(rdram, ctx, 1);
 """
 
 [[patches.hook]]
@@ -347553,3 +347568,133 @@ text = """
     bm64_coop_spawn_color(rdram, ctx);
 """
 # END bm64 coop colors
+
+# BEGIN bm64 coop view range
+# func_80232FF8 (objects, camera mode 1) and func_8027CE10 (items) compare an object's distance from
+# the camera pivot with the camera arm, using the live camera only. These hand them the nearest
+# human's distance and arm instead, so things near any human stay shown and in play.
+[[patches.hook]]
+func = "func_80232FF8"
+before_vram = 0x802331FC
+text = """
+    extern void bm64_coop_range_test(uint8_t* rdram, recomp_context* ctx, int arm_off, int dist_off, int pos_off);
+    bm64_coop_range_test(rdram, ctx, 0x74, 0x68, 0x54);
+"""
+
+[[patches.hook]]
+func = "func_8027CE10"
+before_vram = 0x8027CEC4
+text = """
+    extern void bm64_coop_range_test(uint8_t* rdram, recomp_context* ctx, int arm_off, int dist_off, int pos_off);
+    bm64_coop_range_test(rdram, ctx, 0x54, 0x48, 0x34);
+"""
+# END bm64 coop view range
+
+# BEGIN bm64 lookat stack scrub
+# The camera process calls the patched func_80227CD0 every tick. On a step that is not presented it
+# returns before writing its locals, and in a session each peer passes its own viewed camera through
+# them, so the words it and guLookAt leave below the caller's sp differed between peers that had
+# resimulated a tick and peers that had not (loopback Battle, 2026-11-25). HuPrcSleep1's frame then
+# covers some of them without writing them. Zero the dead stack before the sleep.
+[[patches.hook]]
+func = "func_80236F54"
+before_vram = 0x802370EC
+text = """
+    extern void bm64_scrub_stack(uint8_t* rdram, uint32_t caller_sp);
+    bm64_scrub_stack(rdram, (uint32_t)ctx->r29);
+"""
+# END bm64 lookat stack scrub
+
+# BEGIN bm64 render output
+# Screen grabs copy the presented framebuffer, which the renderer wrote, into game memory for
+# transition effects (the attract demo between stages, 2026-11-25). Those bytes differ between
+# machines and between rendered and resimulated steps, so the state hash skips them while the
+# buffer lives. The table is in the co-op state block (bm64::coop::kRenderOutBase).
+[[patches.hook]]
+func = "func_802957C0"
+before_vram = 0x80295868
+text = """
+    extern void bm64_render_out_add(uint8_t* rdram, uint32_t start, uint32_t size);
+    bm64_render_out_add(rdram, (uint32_t)ctx->r2, 0x25818u);
+"""
+
+[[patches.hook]]
+func = "func_80296D4C"
+before_vram = 0x80296D4C
+text = """
+    extern void bm64_render_out_add(uint8_t* rdram, uint32_t start, uint32_t size);
+    bm64_render_out_add(rdram, (uint32_t)ctx->r5, 0x25818u);
+"""
+
+[[patches.hook]]
+func = "func_80296C10"
+before_vram = 0x80296C10
+text = """
+    extern void bm64_render_out_add(uint8_t* rdram, uint32_t start, uint32_t size);
+    bm64_render_out_add(rdram, (uint32_t)ctx->r4, (uint32_t)((int32_t)ctx->r7 * (int32_t)MEM_W(0x10, ctx->r29) * 2));
+"""
+
+[[patches.hook]]
+func = "func_8029A3F4"
+before_vram = 0x8029A3F4
+text = """
+    extern void bm64_render_out_free(uint8_t* rdram, uint32_t ptr);
+    bm64_render_out_free(rdram, (uint32_t)ctx->r4);
+"""
+# END bm64 render output
+
+
+# BEGIN bm64 billboard view
+# After the draw pass asks func_80237478 for the camera yaw (D_802A5468, D_802A546C), ask again
+# with the viewed player's camera, so flat objects face the camera the window shows.
+[[patches.hook]]
+func = "func_802290CC"
+before_vram = 0x8022915C
+text = """
+    extern int bm64_billboard_view(uint8_t* rdram, int enter);
+    if (bm64_billboard_view(rdram, 1)) {
+        ctx->r4 = (int64_t)(int32_t)0x802A5468;
+        ctx->r5 = (int64_t)(int32_t)0x802A546C;
+        func_80237478(rdram, ctx);
+        bm64_billboard_view(rdram, 0);
+    }
+"""
+# END bm64 billboard view
+
+# BEGIN bm64 camera mode commands
+# Flag and mode commands apply to every human's camera block, not only the live one.
+[[patches.hook]]
+func = "func_802362B8"
+before_vram = 0x802362B8
+text = """
+    extern void bm64_camera_mode_command(uint8_t* rdram, recomp_context* ctx, int kind);
+    bm64_camera_mode_command(rdram, ctx, 0);
+"""
+
+[[patches.hook]]
+func = "func_802362D4"
+before_vram = 0x802362D4
+text = """
+    extern void bm64_camera_mode_command(uint8_t* rdram, recomp_context* ctx, int kind);
+    bm64_camera_mode_command(rdram, ctx, 1);
+"""
+
+[[patches.hook]]
+func = "func_802350F8"
+before_vram = 0x802350F8
+text = """
+    extern void bm64_camera_mode_command(uint8_t* rdram, recomp_context* ctx, int kind);
+    bm64_camera_mode_command(rdram, ctx, 2);
+"""
+# END bm64 camera mode commands
+
+# BEGIN bm64 spawn log
+# Log only (BM64_LOG_SPAWNS). See bm64_log_spawn.
+[[patches.hook]]
+func = "g_spawnEnemyFromAllocation"
+before_vram = 0x802867E4
+text = """
+    extern void bm64_log_spawn(uint8_t* rdram, recomp_context* ctx);
+    bm64_log_spawn(rdram, ctx);
+"""
+# END bm64 spawn log

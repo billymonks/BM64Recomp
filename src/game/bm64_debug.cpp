@@ -59,7 +59,9 @@ namespace {
             { "ovl",  { { 0x80043000, 0x80063000 } } },
             { "bss",  { { 0x80063000, 0x800BD770 }, { 0x800BD818, 0x800BE848 } } },
             { "files", { { 0x8014B000, 0x8014C8D0 }, { 0x8019B0D0, 0x8019C2E0 } } },
-            { "data", { { 0x8029F5E4, 0x8029F608 }, { 0x8029F6D8, 0x802A5300 } } },
+            // D_802A1368 is the audio driver's voice-age counter (func_80266D8C), bumped by every real
+            // sound start; speculative resims start none, so it is audio state, not simulation.
+            { "data", { { 0x8029F5E4, 0x8029F608 }, { 0x8029F6D8, 0x802A1368 }, { 0x802A136C, 0x802A5300 } } },
             { "gfx",  { { 0x802A5300, 0x802A5330 }, { 0x802A5368, 0x802A5380 }, { 0x802A53BC, 0x802A5550 },
                         { 0x802A5554, 0x802A5A60 } } },
             { "prc",  { { 0x802AB200, 0x802AC3E0 } } },
@@ -572,23 +574,63 @@ namespace {
     void hash_segment(uint8_t* rdram, const Segment& seg, const std::vector<Segment>& mask,
                       XXH3_state_t* range, XXH3_state_t* total) {
         std::vector<Segment> skips = mask;
-        if (bm64::coop::omit_render_camera()) {
+        // BM64_HASH_SKIP_LOOKAT hashes a replay the way a session does, so a replay can be compared
+        // with one run under BM64_TEST_NORENDER (which leaves these stale on unrendered steps).
+        static const bool skip_lookat_env = std::getenv("BM64_HASH_SKIP_LOOKAT") != nullptr;
+        if (bm64::coop::omit_render_camera() || skip_lookat_env) {
             // Per-peer lookAt output. The camera block itself stays shared.
             skips.push_back({ 0x802A5418, 0x802A5418 + 64 });
+            // Draw node type 5 (billboards, func_8022D58C) builds its matrix here from the lookAt
+            // above, so it follows the viewed camera and goes stale on unrendered steps too.
+            skips.push_back({ 0x802A5510, 0x802A5510 + 64 });
+            // The camera yaw the draw pass gives flat objects (func_80237478 into D_802A5468 and
+            // D_802A546C), taken from the viewed camera (bm64_billboard_view).
+            skips.push_back({ 0x802A5468, 0x802A5470 });
             skips.push_back({ 0x800BD5C8, 0x800BD5C8 + 0x40 });
             skips.push_back({ 0x800BD638, 0x800BD638 + 0x40 });
-            std::sort(skips.begin(), skips.end(), [](const Segment& a, const Segment& b) {
-                return a.start < b.start;
-            });
         }
+        // Screen grabs (bm64::coop::kRenderOutBase): pixels from the renderer, not simulation.
+        {
+            const uint32_t* table = reinterpret_cast<const uint32_t*>(rdram + (bm64::coop::kRenderOutBase - 0x80000000u));
+            for (int i = 0; i < bm64::coop::kRenderOutSlots; i++) {
+                uint32_t start = table[1 + i * 2];
+                uint32_t stop = table[2 + i * 2];
+                if (start >= 0x80000000u && stop > start && stop <= 0x80800000u) {
+                    skips.push_back({ start & ~3u, (stop + 3u) & ~3u });
+                }
+            }
+        }
+        std::sort(skips.begin(), skips.end(), [](const Segment& a, const Segment& b) {
+            return a.start < b.start;
+        });
         const std::vector<Segment>& used = skips;
         const uint32_t end = seg.end == bm64::debug::kHeapEnd ? bm64::debug::heap_top(rdram) : seg.end;
         uint32_t pos = seg.start;
+        // gGfxWork is double-buffered, and which half a frame is built in depends on how many
+        // frames the render thread has taken (dropped frames, unrendered resims). A process that
+        // keeps a display-list pointer in a stack slot (process 10 in the attract demo) therefore
+        // holds one of two values. Hash a pointer into the second half as the same pointer into
+        // the first, so the hash only sees simulation.
+        constexpr uint32_t kGfxWork = 0x8014C8D0u;
+        constexpr uint32_t kGfxHalf = 0x27000u;
+        thread_local std::vector<uint32_t> folded;
         auto feed = [&](uint32_t from, uint32_t to) {
-            if (to > from) {
-                XXH3_64bits_update(range, rdram + (from - 0x80000000u), to - from);
-                XXH3_64bits_update(total, rdram + (from - 0x80000000u), to - from);
+            if (to <= from) {
+                return;
             }
+            const uint8_t* src = rdram + (from - 0x80000000u);
+            const size_t bytes = to - from;
+            folded.resize((bytes + 3) / 4);
+            std::memcpy(folded.data(), src, bytes);
+            const size_t words = bytes / 4;
+            for (size_t i = 0; i < words; i++) {
+                uint32_t v = folded[i];
+                if (v - (kGfxWork + kGfxHalf) < kGfxHalf) {
+                    folded[i] = v - kGfxHalf;
+                }
+            }
+            XXH3_64bits_update(range, folded.data(), bytes);
+            XXH3_64bits_update(total, folded.data(), bytes);
         };
         for (const Segment& m : used) {
             if (m.end <= pos || m.start >= end) {
@@ -1095,6 +1137,64 @@ namespace {
         return x;
     }
 
+    // BM64_NET_HOST_MENU="tick:hexbuttons[:x:y],...": the host's pad in an unattended online run
+    // (tools/run-loopback.ps1 -HostMenu), in the same format as BM64_DIRECTOR_MENU, so a session can
+    // walk the menus into Battle. BM64_NET_HOST_PULSE=1 then taps A every 30 ticks to take defaults.
+    struct HostMenu {
+        bool parsed = false;
+        std::vector<Director::MenuPress> presses;
+        bool pulse = false;
+    } host_menu;
+
+    bool host_menu_active() {
+        if (!host_menu.parsed) {
+            host_menu.parsed = true;
+            if (const char* menu = std::getenv("BM64_NET_HOST_MENU")) {
+                for (const std::string& item : split(menu, ',')) {
+                    std::vector<std::string> parts = split(item, ':');
+                    uint32_t buttons = 0;
+                    if ((parts.size() == 2 || parts.size() == 4) && parse_hex(parts[1], buttons) && buttons <= 0xFFFF) {
+                        Director::MenuPress press{ std::strtoull(parts[0].c_str(), nullptr, 10), static_cast<uint16_t>(buttons), 0, 0 };
+                        if (parts.size() == 4) {
+                            press.stick_x = static_cast<int8_t>(std::clamp(std::atoi(parts[2].c_str()), -80, 80));
+                            press.stick_y = static_cast<int8_t>(std::clamp(std::atoi(parts[3].c_str()), -80, 80));
+                        }
+                        host_menu.presses.push_back(press);
+                    }
+                }
+            }
+            const char* pulse = std::getenv("BM64_NET_HOST_PULSE");
+            host_menu.pulse = pulse != nullptr && pulse[0] != '\0' && pulse[0] != '0';
+            if (!host_menu.presses.empty() || host_menu.pulse) {
+                printf("[bm64 net] Host pad scripted: %zu menu presses%s\n", host_menu.presses.size(),
+                    host_menu.pulse ? ", then A every 30 ticks" : "");
+            }
+        }
+        return !host_menu.presses.empty() || host_menu.pulse;
+    }
+
+    void host_menu_sample(uint8_t out[6]) {
+        uint16_t button = 0;
+        int8_t stick_x = 0;
+        int8_t stick_y = 0;
+        uint64_t tick = state.tick;
+        uint64_t last = host_menu.presses.empty() ? 0 : host_menu.presses.back().tick + menu_press_ticks;
+        for (const Director::MenuPress& press : host_menu.presses) {
+            if (tick >= press.tick && tick < press.tick + menu_press_ticks) {
+                button = press.buttons;
+                stick_x = press.stick_x;
+                stick_y = press.stick_y;
+            }
+        }
+        if (host_menu.pulse && tick > last && (tick % 30) < 2) {
+            button = 0x8000;
+        }
+        std::memset(out, 0, 6);
+        std::memcpy(out, &button, sizeof(button));
+        out[2] = static_cast<uint8_t>(stick_x);
+        out[3] = static_cast<uint8_t>(stick_y);
+    }
+
     void script_sample(bool buttons, uint8_t out[6]) {
         if (!script_pad.seeded) {
             uint32_t player = static_cast<uint32_t>(bm64::online::local_player());
@@ -1127,6 +1227,55 @@ namespace {
 
 void bm64::debug::set_cheats_disabled(bool disabled) {
     cheats_disabled.store(disabled);
+}
+
+// A screen grab (func_802957C0, func_80296D4C, func_80296C10) is about to fill [start, start + size)
+// from the framebuffer. Kept in bm64::coop::kRenderOutBase (kRenderOutSlots entries) until that block is freed.
+extern "C" void bm64_render_out_add(uint8_t* rdram, uint32_t start, uint32_t size) {
+    uint32_t* table = reinterpret_cast<uint32_t*>(rdram + (bm64::coop::kRenderOutBase - 0x80000000u));
+    if (start < 0x80000000u || size == 0 || size > 0x80000u) {
+        return;
+    }
+    for (int i = 0; i < bm64::coop::kRenderOutSlots; i++) {
+        if (table[1 + i * 2] == start) {
+            table[2 + i * 2] = start + size;
+            return;
+        }
+    }
+    uint32_t slot = table[0] % static_cast<uint32_t>(bm64::coop::kRenderOutSlots);
+    if (table[1 + slot * 2] != 0) {
+        std::printf("[bm64 debug] Screen grab table full: %08X-%08X replaced\n", table[1 + slot * 2], table[2 + slot * 2]);
+    }
+    table[1 + slot * 2] = start;
+    table[2 + slot * 2] = start + size;
+    table[0] = slot + 1;
+    std::printf("[bm64 debug] Screen grab buffer %08X-%08X (tick %llu)\n", start, start + size,
+        static_cast<unsigned long long>(bm64::debug::tick()));
+}
+
+// _free_internal (func_8029A3F4) entry. A freed block stops being a grab buffer; the grabs write
+// at the block start or just past a small header. Its pixels would stay in the heap, which the hash
+// covers up to the high-water mark, so they are zeroed first (before the allocator writes its own
+// bookkeeping). Nothing reads a freed block, and zero is the same on every machine.
+extern "C" void bm64_render_out_free(uint8_t* rdram, uint32_t ptr) {
+    uint32_t* table = reinterpret_cast<uint32_t*>(rdram + (bm64::coop::kRenderOutBase - 0x80000000u));
+    for (int i = 0; i < bm64::coop::kRenderOutSlots; i++) {
+        uint32_t start = table[1 + i * 2];
+        uint32_t stop = table[2 + i * 2];
+        if (start != 0 && start >= ptr && start < ptr + 0x40u) {
+            // Whole words only: RDRAM holds byte-swapped words, so a byte range at an unaligned edge
+            // would clear bytes of the neighbouring data instead.
+            uint32_t from = (start + 3u) & ~3u;
+            uint32_t to = stop & ~3u;
+            if (to > from && to <= 0x80800000u) {
+                std::memset(rdram + (from - 0x80000000u), 0, to - from);
+            }
+            table[1 + i * 2] = 0;
+            table[2 + i * 2] = 0;
+            std::printf("[bm64 debug] Screen grab buffer %08X-%08X freed (tick %llu)\n", start, stop,
+                static_cast<unsigned long long>(bm64::debug::tick()));
+        }
+    }
 }
 
 extern "C" void bm64_cheats_allowed(uint8_t* rdram, recomp_context* ctx) {
@@ -1218,6 +1367,9 @@ extern "C" void bm64_input_filter(uint8_t* rdram, recomp_context* ctx) {
             bool scripted = (mode == NetSample::Script || mode == NetSample::ScriptButtons) && bm64::online::local_player() != 0;
             if (mode == NetSample::Zero) {
                 std::memset(local, 0, sizeof(local));
+            }
+            else if (bm64::online::local_player() == 0 && host_menu_active()) {
+                host_menu_sample(local);
             }
             else if (scripted) {
                 script_sample(mode == NetSample::ScriptButtons, local);
